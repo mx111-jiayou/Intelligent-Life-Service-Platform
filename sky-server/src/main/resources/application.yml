@@ -8,15 +8,15 @@ spring:
     allow-circular-references: true
   datasource:
     druid:
-      driver-class-name: ${sky.datasource.driver-class-name}
-      url: jdbc:mysql://${sky.datasource.host}:${sky.datasource.port}/${sky.datasource.database}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true
-      username: ${sky.datasource.username}
-      password: ${sky.datasource.password}
+      driver-class-name: ${sky.datasource.driver-class-name:com.mysql.cj.jdbc.Driver}
+      url: jdbc:mysql://${sky.datasource.host:localhost}:${sky.datasource.port:3306}/${sky.datasource.database:sky_take_out}?serverTimezone=Asia/Shanghai&useUnicode=true&characterEncoding=utf-8&zeroDateTimeBehavior=convertToNull&useSSL=false&allowPublicKeyRetrieval=true
+      username: ${sky.datasource.username:root}
+      password: ${sky.datasource.password:}
   redis:
-    host: ${sky.redis.host}
-    port: ${sky.redis.port}
-    password: ${sky.redis.password}
-    database: ${sky.redis.database}
+    host: ${sky.redis.host:localhost}
+    port: ${sky.redis.port:6379}
+    password: ${sky.redis.password:}
+    database: ${sky.redis.database:0}
 
 mybatis:
   #mapper配置文件
@@ -51,5 +51,5 @@ sky:
     access-key-secret:
     bucket-name:
   wechat:
-    app-id:${sky.wechat.app-id}
-    secret:${sky.wechat.secret}
+    app-id: ${SKY_WECHAT_APP_ID:}
+    secret: ${SKY_WECHAT_SECRET:}
