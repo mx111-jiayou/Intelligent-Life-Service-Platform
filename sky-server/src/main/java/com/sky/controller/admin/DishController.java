@@ -1,5 +1,6 @@
 package com.sky.controller.admin;
 
+import com.sky.constant.CacheConstant;
 import com.sky.dto.DishDTO;
 import com.sky.dto.DishPageQueryDTO;
 import com.sky.entity.Dish;
@@ -39,7 +40,7 @@ public class DishController {
         log.info("新增菜品：{}", dishDTO);
         dishService.saveWithFlavor(dishDTO);
         //清空所有菜品的缓存数据
-        String key = "dish_" + dishDTO.getCategoryId();
+        String key = CacheConstant.DISH_LIST_PREFIX + dishDTO.getCategoryId();
         cleanCache(key);
         return Result.success();
     }
@@ -62,7 +63,7 @@ public class DishController {
         dishService.deleteBatch(ids);
         //删除缓存数据
         //可能会影响多个key，需要根据分类id删除所有缓存数据 所有以dish_开头的key
-        cleanCache("dish_*");
+        cleanCache(CacheConstant.DISH_LIST_PREFIX + "*");
         return Result.success();
     }
     @GetMapping("/{id}")
@@ -83,7 +84,7 @@ public class DishController {
         log.info("菜品起售停售：{}", id);
         dishService.startOrStop(status, id);
         //删除缓存数据
-        cleanCache("dish_*");
+        cleanCache(CacheConstant.DISH_LIST_PREFIX + "*");
         return Result.success();
     }
     /**
@@ -93,7 +94,9 @@ public class DishController {
     private void cleanCache(String pattern){
         //删除缓存数据
         Set keys = redisTemplate.keys(pattern);
-        redisTemplate.delete(keys);
+        if (keys != null && !keys.isEmpty()) {
+            redisTemplate.delete(keys);
+        }
     }
     /**
      * 根据分类id查询菜品选项
@@ -117,7 +120,7 @@ public class DishController {
         log.info("修改菜品：{}", dishDTO);
         dishService.updateWithFlavor(dishDTO);
         //删除缓存数据
-        cleanCache("dish_*");
+        cleanCache(CacheConstant.DISH_LIST_PREFIX + "*");
         return Result.success();
     }
 }

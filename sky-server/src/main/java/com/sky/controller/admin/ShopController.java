@@ -1,5 +1,7 @@
 package com.sky.controller.admin;
 
+import com.sky.constant.CacheConstant;
+import com.sky.constant.StatusConstant;
 import com.sky.result.Result;
 import io.swagger.annotations.Api;
 import io.swagger.annotations.ApiOperation;
@@ -14,7 +16,6 @@ import org.springframework.web.bind.annotation.*;
 @Api(tags = "店铺相关接口")
 @Slf4j
 public class ShopController {
-    public static final String KEY = "SHOP_STATUS";
     @Autowired
     private RedisTemplate redisTemplate;
     /**
@@ -26,7 +27,7 @@ public class ShopController {
     @ApiOperation("设置营业状态")
     public Result setStatus(@PathVariable Integer status) {
         log.info("设置店铺营业状态:{}", status == 1?"营业中" : "打烊中");
-        redisTemplate.opsForValue().set(KEY, status);
+        redisTemplate.opsForValue().set(CacheConstant.SHOP_STATUS, status);
         return Result.success();
     }
     /**
@@ -37,7 +38,11 @@ public class ShopController {
     @GetMapping ("/status")
     public Result<Integer> getStatus() {
         //log.info("获取店铺营业状态");
-        Integer status = (Integer) redisTemplate.opsForValue().get(KEY);
+        Integer status = (Integer) redisTemplate.opsForValue().get(CacheConstant.SHOP_STATUS);
+        if (status == null) {
+            status = StatusConstant.DISABLE;
+            redisTemplate.opsForValue().set(CacheConstant.SHOP_STATUS, status);
+        }
         //判断当前店铺营业状态是否存在
         log.info("获取店铺营业状态为：{}", status == 1?"营业中" : "打烊中");
         return Result.success(status);
