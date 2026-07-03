@@ -10,4 +10,24 @@
         (#{mapperId}, #{sqlText}, #{normalizedSql}, #{sqlSignature}, #{costTime}, #{thresholdTime}, #{createTime})
     </insert>
 
+    <select id="pageQuery" resultType="com.sky.entity.SlowSqlLog">
+        select *
+        from slow_sql_log
+        <where>
+            <if test="mapperId != null and mapperId != ''">
+                and mapper_id like concat('%', #{mapperId}, '%')
+            </if>
+            <if test="sqlSignature != null and sqlSignature != ''">
+                and sql_signature = #{sqlSignature}
+            </if>
+            <if test="beginTime != null">
+                and create_time &gt;= #{beginTime}
+            </if>
+            <if test="endTime != null">
+                and create_time &lt;= #{endTime}
+            </if>
+        </where>
+        order by create_time desc
+    </select>
+
 </mapper>
