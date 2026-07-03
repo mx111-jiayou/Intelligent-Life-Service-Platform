@@ -204,6 +204,30 @@ public class OrderServiceImpl implements OrderService {
     }
 
     @Override
+    public String queryOrderSummary(Long id) {
+        Long userId = BaseContext.getCurrentId();
+        Orders orders = orderMapper.getByIdAndUserId(id, userId);
+        if (orders == null) {
+            return "未查询到该订单。";
+        }
+        return "订单号：" + orders.getNumber()
+                + "，状态：" + formatOrderStatus(orders.getStatus())
+                + "，实付金额：" + orders.getAmount()
+                + "，下单时间：" + orders.getOrderTime() + "。";
+    }
+
+    @Override
+    public String remindOrderForAi(Long id) {
+        Long userId = BaseContext.getCurrentId();
+        Orders orders = orderMapper.getByIdAndUserId(id, userId);
+        if (orders == null) {
+            return "未查询到该订单，无法催单。";
+        }
+        reminder(id);
+        return "已为订单" + orders.getNumber() + "发送催单提醒。";
+    }
+
+    @Override
     public String cancelOrderForAi(Long id, String reason) {
         Long userId = BaseContext.getCurrentId();
         Orders orders = orderMapper.getByIdAndUserId(id, userId);

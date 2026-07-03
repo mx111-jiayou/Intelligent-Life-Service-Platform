@@ -34,5 +34,9 @@ public interface OrderService {
 
     String queryLatestOrderSummary();
 
+    String queryOrderSummary(Long id);
+
+    String remindOrderForAi(Long id);
+
     String cancelOrderForAi(Long id, String reason);
 }

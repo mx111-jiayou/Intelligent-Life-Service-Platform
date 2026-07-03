@@ -8,6 +8,7 @@ import com.sky.entity.ChatMessage;
 import com.sky.entity.KnowledgeDoc;
 import com.sky.mapper.ChatMessageMapper;
 import com.sky.service.AiChatService;
+import com.sky.service.AiToolCallLogService;
 import com.sky.service.KnowledgeDocService;
 import com.sky.service.OrderService;
 import com.sky.vo.AiChatVO;
@@ -37,6 +38,8 @@ public class AiChatServiceImpl implements AiChatService {
     private StringRedisTemplate stringRedisTemplate;
     @Autowired
     private OrderService orderService;
+    @Autowired
+    private AiToolCallLogService aiToolCallLogService;
 
     @Override
     public AiChatVO chat(AiChatDTO aiChatDTO) {
@@ -47,7 +50,7 @@ public class AiChatServiceImpl implements AiChatService {
         String message = StringUtils.trimToEmpty(aiChatDTO.getMessage());
 
         saveMessage(userId, sessionId, "user", message);
-        String toolReply = tryCallOrderTool(message);
+        String toolReply = tryCallOrderTool(userId, sessionId, message);
         List<KnowledgeDoc> docs = knowledgeDocService.searchEnabled(message, 3);
         List<String> references = docs.stream()
                 .map(KnowledgeDoc::getTitle)
@@ -62,18 +65,49 @@ public class AiChatServiceImpl implements AiChatService {
                 .build();
     }
 
-    private String tryCallOrderTool(String message) {
+    private String tryCallOrderTool(Long userId, String sessionId, String message) {
         if (StringUtils.contains(message, "最近") && StringUtils.contains(message, "订单")) {
-            return orderService.queryLatestOrderSummary();
+            return callTool(userId, sessionId, "query_latest_order", "{}", orderService::queryLatestOrderSummary);
+        }
+        if (StringUtils.contains(message, "催单") || StringUtils.contains(message, "催一下")) {
+            Long orderId = extractFirstNumber(message);
+            if (orderId == null) {
+                return "请提供需要催单的订单ID，例如：催单 123。";
+            }
+            return callTool(userId, sessionId, "remind_order", "{\"orderId\":" + orderId + "}",
+                    () -> orderService.remindOrderForAi(orderId));
         }
         if (StringUtils.contains(message, "取消") && StringUtils.contains(message, "订单")) {
             Long orderId = extractFirstNumber(message);
             if (orderId == null) {
                 return "请提供需要取消的订单ID，例如：取消订单 123。";
             }
-            return orderService.cancelOrderForAi(orderId, "AI客服用户申请取消");
+            if (!StringUtils.contains(message, "确认")) {
+                return "取消订单属于重要操作。请回复：确认取消订单 " + orderId + "。";
+            }
+            return callTool(userId, sessionId, "cancel_order", "{\"orderId\":" + orderId + "}",
+                    () -> orderService.cancelOrderForAi(orderId, "AI客服用户确认取消"));
+        }
+        if (StringUtils.contains(message, "订单")) {
+            Long orderId = extractFirstNumber(message);
+            if (orderId != null) {
+                return callTool(userId, sessionId, "query_order", "{\"orderId\":" + orderId + "}",
+                        () -> orderService.queryOrderSummary(orderId));
+            }
         }
         return null;
+    }
+
+    private String callTool(Long userId, String sessionId, String toolName, String toolParams, ToolInvoker toolInvoker) {
+        try {
+            String result = toolInvoker.invoke();
+            aiToolCallLogService.save(userId, sessionId, toolName, toolParams, result, true);
+            return result;
+        } catch (Exception e) {
+            String result = "工具调用失败：" + e.getMessage();
+            aiToolCallLogService.save(userId, sessionId, toolName, toolParams, result, false);
+            return result;
+        }
     }
 
     private Long extractFirstNumber(String message) {
@@ -117,5 +151,9 @@ public class AiChatServiceImpl implements AiChatService {
             return content;
         }
         return content.substring(0, maxLength) + "...";
+    }
+
+    private interface ToolInvoker {
+        String invoke();
     }
 }
