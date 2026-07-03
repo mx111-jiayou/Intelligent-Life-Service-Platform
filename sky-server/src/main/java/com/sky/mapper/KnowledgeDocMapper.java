@@ -5,6 +5,7 @@ import com.sky.dto.KnowledgeDocPageQueryDTO;
 import com.sky.entity.KnowledgeDoc;
 import org.apache.ibatis.annotations.Delete;
 import org.apache.ibatis.annotations.Mapper;
+import org.apache.ibatis.annotations.Param;
 import org.apache.ibatis.annotations.Select;
 
 import java.util.List;
@@ -22,5 +23,5 @@ public interface KnowledgeDocMapper {
     void deleteById(Long id);
 
     @Select("select * from knowledge_doc where status = 1 and (title like concat('%', #{keyword}, '%') or content like concat('%', #{keyword}, '%')) order by update_time desc limit #{limit}")
-    List<KnowledgeDoc> searchEnabled(String keyword, Integer limit);
+    List<KnowledgeDoc> searchEnabled(@Param("keyword") String keyword, @Param("limit") Integer limit);
 }

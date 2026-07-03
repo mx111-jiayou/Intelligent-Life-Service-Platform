@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.sky.mapper.ChatMessageMapper">
+
+    <insert id="insert" parameterType="com.sky.entity.ChatMessage" useGeneratedKeys="true" keyProperty="id">
+        insert into chat_message
+        (user_id, session_id, role, content, create_time)
+        values
+        (#{userId}, #{sessionId}, #{role}, #{content}, #{createTime})
+    </insert>
+
+</mapper>

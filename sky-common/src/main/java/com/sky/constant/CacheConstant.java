@@ -10,4 +10,6 @@ public class CacheConstant {
     public static final String DISH_LIST_PREFIX = "dish_";
 
     public static final String ORDER_ID_PREFIX = "id:order:";
+
+    public static final String CHAT_MEMORY_PREFIX = "chat:memory:";
 }
