@@ -35,6 +35,8 @@ logging:
         controller: info
 
 sky:
+  sql-monitor:
+    slow-threshold-ms: ${SKY_SQL_MONITOR_SLOW_THRESHOLD_MS:500}
   jwt:
     # 设置jwt签名加密时使用的秘钥
     admin-secret-key: itcast
