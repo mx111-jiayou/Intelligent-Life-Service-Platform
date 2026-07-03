@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.sky.mapper.SlowSqlLogMapper">
+
+    <insert id="insert" parameterType="com.sky.entity.SlowSqlLog" useGeneratedKeys="true" keyProperty="id">
+        insert into slow_sql_log
+        (mapper_id, sql_text, normalized_sql, sql_signature, cost_time, threshold_time, create_time)
+        values
+        (#{mapperId}, #{sqlText}, #{normalizedSql}, #{sqlSignature}, #{costTime}, #{thresholdTime}, #{createTime})
+    </insert>
+
+</mapper>
