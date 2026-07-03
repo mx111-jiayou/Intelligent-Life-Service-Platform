@@ -115,6 +115,54 @@ sky:
 sky-server/src/main/java/com/sky/interceptor/SlowSqlInterceptor.java
 ```
 
+### 5. 慢 SQL 异步落库与管理查询
+
+已完成：
+
+- 新增慢 SQL 日志表 `slow_sql_log`
+- 慢 SQL 拦截器生成归一化 SQL 与 `sqlSignature`
+- 使用线程池异步写入慢 SQL 日志，降低同步链路耗时
+- 新增管理端慢 SQL 分页查询接口
+- 支持按 `sqlSignature` 查询同类慢 SQL
+
+核心接口：
+
+```text
+GET /admin/slow-sql/page
+GET /admin/slow-sql/signature/{sqlSignature}
+```
+
+### 6. AI 客服知识库与对话入口
+
+已完成：
+
+- 新增客服知识库表 `knowledge_doc`
+- 支持管理端新增、修改、删除、启停、分页查询知识库文档
+- 支持按关键词检索启用状态的知识库文档
+- 新增用户端 AI 客服对话接口
+- 新增 `chat_message` 对话记录表
+- 使用 Redis 保存短期会话记忆，MySQL 沉淀长期对话记录
+- AI 客服可基于知识库内容生成基础回复
+
+核心接口：
+
+```text
+POST /user/ai/chat
+GET /admin/knowledge-doc/page
+GET /admin/knowledge-doc/search
+```
+
+### 7. Function Calling 订单工具雏形
+
+已完成：
+
+- AI 客服可识别“最近订单”意图并调用本地订单服务
+- AI 客服可识别“取消订单”意图并调用本地订单取消能力
+- 新增订单查询工具方法，支持获取用户最近一笔订单摘要
+- 修正下单时 `order_time` 未写入的问题，保证最近订单排序准确
+
+当前属于 Function Calling 的本地规则版雏形，后续接入 Spring AI Alibaba / DashScope 后，可替换为大模型工具调用。
+
 ## 运行说明
 
 ### 1. 准备环境
@@ -178,20 +226,21 @@ mvn spring-boot:run
 
 后续按以下顺序继续推进：
 
-1. 慢 SQL 日志表落库
-2. 慢 SQL 管理端查询接口
-3. SQL 执行上下文采集，包括 Mapper、接口路径、耗时、参数
-4. JSqlParser SQL 结构解析
-5. SQL 性能评分体系
-6. Easy Rules 规则引擎集成
-7. Dify / Spring AI Alibaba 接入
-8. RAG 知识库接入
+1. SQL 执行上下文采集，包括接口路径、用户、参数摘要
+2. JSqlParser SQL 结构解析
+3. SQL 性能评分体系
+4. Easy Rules 规则引擎集成
+5. SQL 优化结果 Redis 缓存
+6. Spring AI Alibaba / DashScope 接入
+7. RAG 向量检索增强知识库问答
+8. 大模型 Function Calling 替换本地意图规则
 9. AI 生成 SQL 优化建议
 10. 商家经营分析、用户推荐、配送调度等智能业务扩展
 
 ## 项目亮点
 
 - 不脱离原始苍穹外卖业务，所有增强都围绕真实业务链路展开
-- 缓存优化、订单号生成、慢 SQL 识别均可实际运行
+- 缓存优化、订单号生成、慢 SQL 识别、AI 客服入口均可实际运行
+- 已具备 RAG 知识库、Redis 短期记忆、MySQL 长期对话记录、订单工具调用雏形
 - 改造路径清晰，适合作为课程项目升级、简历项目或毕业设计基础
 - 后续可自然扩展到 AI SQL 优化、智能经营分析和智能推荐系统
