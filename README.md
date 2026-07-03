@@ -158,10 +158,29 @@ GET /admin/knowledge-doc/search
 
 - AI 客服可识别“最近订单”意图并调用本地订单服务
 - AI 客服可识别“取消订单”意图并调用本地订单取消能力
+- AI 客服可识别“查询指定订单”“催单”等订单意图
+- 对取消订单增加二次确认提示，降低误操作风险
+- 新增 AI 工具调用日志表 `ai_tool_call_log`，记录工具名称、参数、结果和成功状态
 - 新增订单查询工具方法，支持获取用户最近一笔订单摘要
 - 修正下单时 `order_time` 未写入的问题，保证最近订单排序准确
 
 当前属于 Function Calling 的本地规则版雏形，后续接入 Spring AI Alibaba / DashScope 后，可替换为大模型工具调用。
+
+### 8. SQL 优化结果缓存
+
+已完成：
+
+- 新增 SQL 优化结果表 `sql_optimization_result`
+- 基于 `sqlSignature` 保存优化建议、优化后 SQL、评分和模型名称
+- 使用 Redis 缓存 SQL 优化结果，避免相同慢 SQL 重复调用 AI
+- 新增管理端保存/查询 SQL 优化结果接口
+
+核心接口：
+
+```text
+POST /admin/sql-optimization/result
+GET /admin/sql-optimization/result/{sqlSignature}
+```
 
 ## 运行说明
 
@@ -230,17 +249,18 @@ mvn spring-boot:run
 2. JSqlParser SQL 结构解析
 3. SQL 性能评分体系
 4. Easy Rules 规则引擎集成
-5. SQL 优化结果 Redis 缓存
-6. Spring AI Alibaba / DashScope 接入
-7. RAG 向量检索增强知识库问答
-8. 大模型 Function Calling 替换本地意图规则
-9. AI 生成 SQL 优化建议
+5. Spring AI Alibaba / DashScope 接入
+6. RAG 向量检索增强知识库问答
+7. 大模型 Function Calling 替换本地意图规则
+8. AI 生成 SQL 优化建议
+9. RabbitMQ 异步处理 AI 优化任务
 10. 商家经营分析、用户推荐、配送调度等智能业务扩展
 
 ## 项目亮点
 
 - 不脱离原始苍穹外卖业务，所有增强都围绕真实业务链路展开
 - 缓存优化、订单号生成、慢 SQL 识别、AI 客服入口均可实际运行
-- 已具备 RAG 知识库、Redis 短期记忆、MySQL 长期对话记录、订单工具调用雏形
+- 已具备 RAG 知识库、Redis 短期记忆、MySQL 长期对话记录、订单工具调用和工具调用日志
+- 已具备 SQL 优化结果缓存能力，可复用同类慢 SQL 的优化建议
 - 改造路径清晰，适合作为课程项目升级、简历项目或毕业设计基础
 - 后续可自然扩展到 AI SQL 优化、智能经营分析和智能推荐系统
