@@ -31,4 +31,8 @@ public interface OrderService {
      * @param id 订单id
      */
     void reminder(Long id);
+
+    String queryLatestOrderSummary();
+
+    String cancelOrderForAi(Long id, String reason);
 }

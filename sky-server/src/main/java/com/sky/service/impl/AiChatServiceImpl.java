@@ -9,6 +9,7 @@ import com.sky.entity.KnowledgeDoc;
 import com.sky.mapper.ChatMessageMapper;
 import com.sky.service.AiChatService;
 import com.sky.service.KnowledgeDocService;
+import com.sky.service.OrderService;
 import com.sky.vo.AiChatVO;
 import org.apache.commons.lang.StringUtils;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -19,6 +20,8 @@ import java.time.LocalDateTime;
 import java.util.List;
 import java.util.UUID;
 import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 @Service
@@ -32,6 +35,8 @@ public class AiChatServiceImpl implements AiChatService {
     private ChatMessageMapper chatMessageMapper;
     @Autowired
     private StringRedisTemplate stringRedisTemplate;
+    @Autowired
+    private OrderService orderService;
 
     @Override
     public AiChatVO chat(AiChatDTO aiChatDTO) {
@@ -42,11 +47,12 @@ public class AiChatServiceImpl implements AiChatService {
         String message = StringUtils.trimToEmpty(aiChatDTO.getMessage());
 
         saveMessage(userId, sessionId, "user", message);
+        String toolReply = tryCallOrderTool(message);
         List<KnowledgeDoc> docs = knowledgeDocService.searchEnabled(message, 3);
         List<String> references = docs.stream()
                 .map(KnowledgeDoc::getTitle)
                 .collect(Collectors.toList());
-        String reply = buildReply(docs);
+        String reply = StringUtils.isNotBlank(toolReply) ? toolReply : buildReply(docs);
         saveMessage(userId, sessionId, "assistant", reply);
 
         return AiChatVO.builder()
@@ -54,6 +60,28 @@ public class AiChatServiceImpl implements AiChatService {
                 .reply(reply)
                 .references(references)
                 .build();
+    }
+
+    private String tryCallOrderTool(String message) {
+        if (StringUtils.contains(message, "最近") && StringUtils.contains(message, "订单")) {
+            return orderService.queryLatestOrderSummary();
+        }
+        if (StringUtils.contains(message, "取消") && StringUtils.contains(message, "订单")) {
+            Long orderId = extractFirstNumber(message);
+            if (orderId == null) {
+                return "请提供需要取消的订单ID，例如：取消订单 123。";
+            }
+            return orderService.cancelOrderForAi(orderId, "AI客服用户申请取消");
+        }
+        return null;
+    }
+
+    private Long extractFirstNumber(String message) {
+        Matcher matcher = Pattern.compile("\\d+").matcher(message);
+        if (!matcher.find()) {
+            return null;
+        }
+        return Long.valueOf(matcher.group());
     }
 
     private String buildReply(List<KnowledgeDoc> docs) {

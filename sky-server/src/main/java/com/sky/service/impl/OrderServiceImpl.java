@@ -189,4 +189,59 @@ public class OrderServiceImpl implements OrderService {
         webSocketServer.sendToAllClient(JSON.toJSONString(map));
 
     }
+
+    @Override
+    public String queryLatestOrderSummary() {
+        Long userId = BaseContext.getCurrentId();
+        Orders orders = orderMapper.getLatestByUserId(userId);
+        if (orders == null) {
+            return "暂未查询到你的订单记录。";
+        }
+        return "你最近一笔订单号为" + orders.getNumber()
+                + "，订单状态：" + formatOrderStatus(orders.getStatus())
+                + "，实付金额：" + orders.getAmount()
+                + "，下单时间：" + orders.getOrderTime() + "。";
+    }
+
+    @Override
+    public String cancelOrderForAi(Long id, String reason) {
+        Long userId = BaseContext.getCurrentId();
+        Orders orders = orderMapper.getByIdAndUserId(id, userId);
+        if (orders == null) {
+            return "未查询到该订单，无法取消。";
+        }
+        if (Orders.COMPLETED.equals(orders.getStatus()) || Orders.CANCELLED.equals(orders.getStatus())) {
+            return "该订单当前状态为" + formatOrderStatus(orders.getStatus()) + "，无法取消。";
+        }
+        Orders updateOrder = Orders.builder()
+                .id(id)
+                .status(Orders.CANCELLED)
+                .cancelReason(reason)
+                .cancelTime(LocalDateTime.now())
+                .build();
+        orderMapper.update(updateOrder);
+        return "订单" + orders.getNumber() + "已为你提交取消处理。";
+    }
+
+    private String formatOrderStatus(Integer status) {
+        if (Orders.PENDING_PAYMENT.equals(status)) {
+            return "待付款";
+        }
+        if (Orders.TO_BE_CONFIRMED.equals(status)) {
+            return "待接单";
+        }
+        if (Orders.CONFIRMED.equals(status)) {
+            return "已接单";
+        }
+        if (Orders.DELIVERY_IN_PROGRESS.equals(status)) {
+            return "派送中";
+        }
+        if (Orders.COMPLETED.equals(status)) {
+            return "已完成";
+        }
+        if (Orders.CANCELLED.equals(status)) {
+            return "已取消";
+        }
+        return "未知状态";
+    }
 }
