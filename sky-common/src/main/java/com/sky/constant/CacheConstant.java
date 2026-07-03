@@ -12,4 +12,6 @@ public class CacheConstant {
     public static final String ORDER_ID_PREFIX = "id:order:";
 
     public static final String CHAT_MEMORY_PREFIX = "chat:memory:";
+
+    public static final String SQL_OPTIMIZATION_PREFIX = "sql:optimization:";
 }

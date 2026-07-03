@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd" >
+<mapper namespace="com.sky.mapper.SqlOptimizationResultMapper">
+
+    <insert id="insert" parameterType="com.sky.entity.SqlOptimizationResult" useGeneratedKeys="true" keyProperty="id">
+        insert into sql_optimization_result
+        (sql_signature, original_sql, optimized_sql, suggestion, score, model_name, create_time, update_time)
+        values
+        (#{sqlSignature}, #{originalSql}, #{optimizedSql}, #{suggestion}, #{score}, #{modelName}, #{createTime}, #{updateTime})
+    </insert>
+
+    <update id="update" parameterType="com.sky.entity.SqlOptimizationResult">
+        update sql_optimization_result
+        set original_sql = #{originalSql},
+            optimized_sql = #{optimizedSql},
+            suggestion = #{suggestion},
+            score = #{score},
+            model_name = #{modelName},
+            update_time = #{updateTime}
+        where sql_signature = #{sqlSignature}
+    </update>
+
+</mapper>
