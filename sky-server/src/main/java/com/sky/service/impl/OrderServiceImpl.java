@@ -12,6 +12,7 @@ import com.sky.exception.OrderBusinessException;
 import com.sky.exception.ShoppingCartBusinessException;
 import com.sky.mapper.*;
 import com.sky.service.OrderService;
+import com.sky.utils.RedisIdWorker;
 import com.sky.utils.WeChatPayUtil;
 import com.sky.vo.OrderPaymentVO;
 import com.sky.vo.OrderSubmitVO;
@@ -45,6 +46,8 @@ public class OrderServiceImpl implements OrderService {
     private UserMapper userMapper;
     @Autowired
     private WebSocketServer webSocketServer;
+    @Autowired
+    private RedisIdWorker redisIdWorker;
 
     /**
      * 用户下单
@@ -78,7 +81,7 @@ public class OrderServiceImpl implements OrderService {
         BeanUtils.copyProperties(orderSubmitDTO, orders);
         orders.setOrderTime(LocalDateTime.now());
         orders.setPayStatus(Orders.UN_PAID);
-        orders.setNumber(String.valueOf(System.currentTimeMillis()));
+        orders.setNumber(String.valueOf(redisIdWorker.nextOrderId()));
         orders.setConsignee(addressBook.getConsignee());
         orders.setPhone(addressBook.getPhone());
         orders.setUserId(userId);
