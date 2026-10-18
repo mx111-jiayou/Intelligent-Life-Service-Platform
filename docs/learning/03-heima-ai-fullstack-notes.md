@@ -1,0 +1,785 @@
+# 苍穹外卖：按黑马顺序学习 AI 辅助全栈开发
+
+整理日期：2026-10-18。
+
+这份笔记整理本次聊天已经讲过的内容，重点保留容易混淆的概念。示例中的员工、分类编号和记录数量是教学数据，不代表当前数据库中的实际内容。
+
+学习目标：看懂数据流和业务规则，能够向 AI 说明需求、阅读关键代码、验证结果。框架源码和反射语法暂时不要求背诵。
+
+## 复习导航与当前进度
+
+| 章节 | 复习内容 |
+| --- | --- |
+| 1 | 项目结构、登录、接口和数据对象 |
+| 2 | 分页参数、SQL、PageHelper、前端翻页 |
+| 3 | MyBatis、Mapper、XML 和参数绑定 |
+| 4 | 动态 SQL |
+| 5 | 启用、禁用员工 |
+| 6 | 编辑员工：查询、回显、提交修改 |
+| 7 | 分类、套餐、表关联和删除检查 |
+| 8 | 公共字段自动填充、BaseContext、AOP |
+| 9 | 使用 AI 开发时的验收方法 |
+| 10 | 自测题与答案 |
+
+当前讲解到 Day 3 的公共字段自动填充：已用“管理员1修改员工8”的代码推演串联流程，补充反射的“找到方法 → 调用方法”和对象赋值与数据库更新的区别。这里只做代码讲解，没有实际修改员工数据；反射源码和完整异常处理不作为当前重点。下一阶段可进入文件上传、菜品新增等业务。
+
+Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
+
+学习约定：每学完一个小节就更新这份笔记，记录核心概念、项目示例、追问过的易混点和当前进度。以重新讲清楚后的版本为准，不仅记录最初讲解。
+
+## 1. 项目和登录：快速复习
+
+### 1.1 一次请求的路径
+
+```text
+前端发送请求
+  → 代理转发（按运行配置）
+  → Controller 接收参数
+  → Service 执行业务规则
+  → Mapper / MyBatis 操作数据库
+  → 结果返回前端
+```
+
+| 部分 | 职责 |
+| --- | --- |
+| 前端 | 展示数据、收集输入、发送请求、显示结果 |
+| Controller | 接收请求，调用业务方法，组织响应 |
+| Service | 判断业务条件、组织处理步骤 |
+| Mapper | 声明数据库操作方法 |
+| MyBatis | 根据 SQL 配置和参数协调执行，转换查询结果 |
+| MySQL | 保存数据、执行 SQL |
+
+后端模块：`sky-common` 放公共工具、异常和返回对象；`sky-pojo` 放 DTO、Entity、VO；`sky-server` 放 Controller、Service、Mapper、配置等。
+
+### 1.2 DTO、Entity、VO
+
+| 名称 | 用途 | 登录中的例子 |
+| --- | --- | --- |
+| DTO | 接收本次操作的输入 | 用户名、密码 |
+| Entity | 表示业务实体，通常对应数据库记录 | 员工记录 |
+| VO | 组织返回给前端的数据 | 员工信息、token |
+
+数据库保存的字段，不代表都应该返回前端。接收成功也不等于参数合法，必填、长度、允许值等需要另外校验。
+
+### 1.3 登录流程
+
+后端接口：`POST /admin/employee/login`。已有前端练习请求 `/api/employee/login`，通过代理配置对应到后端。
+
+```text
+提交账号密码
+  → 根据用户名查询员工
+  → 检查账号是否存在、密码是否匹配、账号是否禁用
+  → 通过后生成 token
+  → 前端后续请求携带 token
+```
+
+`@RequestMapping("/admin/employee")` 和 `@PostMapping("/login")` 共同确定接口路径。
+
+项目响应使用 `{ code, msg, data }`，其中 `code=1` 表示业务成功。HTTP 状态码与这里的 `code` 不同：收到 HTTP 200，也要检查业务结果。
+
+## 2. 分页查询：重点复习
+
+### 2.1 四个变量
+
+假设符合条件的员工共有 23 名，每页最多显示 10 名。
+
+| 变量 | 含义 | 第 3 页的值 |
+| --- | --- | --- |
+| `page` | 查询第几页 | 3 |
+| `pageSize` | 每页最多多少条 | 10 |
+| `total` | 符合条件的总记录数 | 23 |
+| `records` | 当前页的记录列表 | 最后 3 名员工 |
+
+前端提供 `page`、`pageSize` 和搜索条件；后端返回 `total`、`records`。
+
+```text
+第1页：排序后的第1～10条
+第2页：排序后的第11～20条
+第3页：排序后的第21～23条
+```
+
+“第 11 条”是排序后的位置，不是员工 ID 为 11。`pageSize=10` 不保证每页都有 10 条。
+
+### 2.2 LIMIT 和偏移量
+
+```text
+offset = (page - 1) × pageSize
+总页数 = total ÷ pageSize，向上取整
+```
+
+| 查询页码 | 跳过条数 | SQL 写法 |
+| --- | --- | --- |
+| 1 | 0 | `LIMIT 0, 10` |
+| 2 | 10 | `LIMIT 10, 10` |
+| 3 | 20 | `LIMIT 20, 10` |
+
+```sql
+SELECT *
+FROM employee
+ORDER BY create_time DESC
+LIMIT 10, 10;
+```
+
+含义：按创建时间从新到旧排列，跳过前 10 条，最多取 10 条。
+
+### 2.3 为什么还要查总数
+
+本页返回 10 条，不能据此知道总共有多少条，因此分页通常需要统计总数和查询本页两项工作。
+
+```sql
+-- 统计符合条件的总数
+SELECT COUNT(*) FROM employee WHERE name LIKE '%张%';
+
+-- 查询符合条件的数据中的第2页
+SELECT * FROM employee
+WHERE name LIKE '%张%'
+ORDER BY create_time DESC
+LIMIT 10, 10;
+```
+
+以上为教学 SQL，实际项目通过参数绑定提供姓名。总数查询与列表查询必须使用一致的筛选条件。
+
+### 2.4 PageHelper 是什么
+
+PageHelper 是分页插件库，帮助处理分页 SQL、总数统计和分页结果。它不保存业务数据，也不需要先把全部员工查到 Java 内存再截取。
+
+下面的代码在 **EmployeeServiceImpl 的 pageQuery 方法里**：
+
+```java
+PageHelper.startPage(
+    employeePageQueryDTO.getPage(),
+    employeePageQueryDTO.getPageSize()
+);
+
+Page<Employee> page = employeeMapper.pageQuery(employeePageQueryDTO);
+
+long total = page.getTotal();
+List<Employee> records = page.getResult();
+return new PageResult(total, records);
+```
+
+逐句理解：
+
+1. `startPage` 设置这次分页要求，此时还没有查询员工。
+2. 调用 Mapper 触发查询，插件在执行过程中处理分页。
+3. `getTotal()` 取出符合条件的总数。
+4. `getResult()` 取出当前页数据。
+5. `new PageResult(...)` 包装接口结果，不会再查询数据库。
+
+这三个名字要区分：
+
+| 名称 | 含义 |
+| --- | --- |
+| `PageHelper` | 提供分页能力的工具及其配套插件机制 |
+| `Page<Employee>` | 插件提供的分页结果类型，包含员工数据和分页信息 |
+| `PageResult` | 项目自定义的结果类，装 `total`、`records` |
+
+`Page<Employee> page` 中的 `page` 是结果对象，不是数字页码。它也可以改名为 `employeePageResult`，不影响功能。
+
+### 2.5 XML 没写 LIMIT，为什么仍然分页
+
+```text
+startPage 设置页码和每页条数
+  → Mapper 提供基础 SQL
+  → PageHelper 在查询过程中处理统计与分页
+  → MySQL 执行 SQL
+  → 返回分页结果
+```
+
+在当前这种调用方式下，`startPage` 应紧挨目标 MyBatis 查询，分页作用于同一线程中紧随其后的第一个查询。不要在两者之间插入无关查询，也不要误以为一次设置会让之后所有查询永久分页。正常执行完成后插件会清理分页设置。[PageHelper 官方说明](https://pagehelper.github.io/docs/howtouse/)
+
+仅把带有 `page`、`pageSize` 的 DTO 传给 Mapper，并不意味着当前实现自动完成分页；这里依靠前面的 `startPage`。
+
+### 2.6 返回前端的结构
+
+Controller 用 `Result.success(pageResult)` 再包装一层，得到下面的结构示意：
+
+```text
+Result
+├─ code：1
+├─ msg：null
+└─ data：PageResult
+   ├─ total：23
+   └─ records：当前页员工列表
+```
+
+前端读取：
+
+```js
+employees.value = result.data.records;
+employeeTotal.value = result.data.total;
+```
+
+表格使用 `records`；总页数通过 `Math.ceil(total / pageSize)` 计算。
+
+### 2.7 翻页与搜索
+
+```text
+点击第2页
+  → 页码改为2
+  → 重新发送请求
+  → 用新 records 替换表格数据
+```
+
+改变 Vue 页码变量本身，不会自动决定调用接口，需要翻页事件或监听逻辑触发查询。
+
+| 操作 | 参数变化 |
+| --- | --- |
+| 翻页 | 改变 page，保留搜索条件 |
+| 搜索新姓名 | 改变 name，通常把 page 重置为 1 |
+| 修改每页条数 | 改变 pageSize，通常把 page 重置为 1 |
+| 清空搜索 | 清空 name，把 page 重置为 1 |
+
+例如搜索“张”后翻到第 2 页，仍应发送 `page=2&pageSize=10&name=张`。漏掉姓名条件就变成查询全部员工。
+
+如果新搜索只有 7 条结果，沿用旧的第 3 页会要求跳过 20 条，可能显示空列表，因此搜索时应重置页码。
+
+截至整理时，已有 `LoginPanel.vue` 练习的请求固定为 `page=1&pageSize=10`，没有完整翻页交互；聊天中的动态页码代码是教学示例，不是已经完成的改动。
+
+### 2.8 需要验收的边界
+
+- 页码从 1 开始，每页条数应有合理上限。当前分页 DTO 的 `int` 字段没有显式业务默认值或参数校验，不能假定缺省就是 1 和 10。
+- 没有匹配记录是成功的空结果：`total=0`、`records=[]`。
+- 当前 XML 仅按创建时间倒序；可增加唯一 ID 作为同时间记录的排序依据，例如 `ORDER BY create_time DESC, id DESC`。这能明确相同时间下的顺序，但不解决并发数据变化导致的翻页偏移。
+- 快速连续搜索时，较早请求可能较晚返回。可取消旧请求或只接受最新请求结果；仅加防抖不保证消除已发出请求的竞态。
+- 检查接口字段是否过多，不能仅因为表格不展示密码字段，就认为响应没有返回它。分页直接返回实体，需要核对实际响应和序列化配置。
+
+## 3. MyBatis、Mapper、XML：重点答疑
+
+### 3.1 MyBatis 不是 XML 文件
+
+| 名称 | 是什么 |
+| --- | --- |
+| MyBatis | 项目引入的数据库访问框架 |
+| EmployeeMapper.java | Java 接口，声明查询和修改方法 |
+| EmployeeMapper.xml | 写 SQL 和映射配置的文件 |
+| MySQL | 真正保存数据、执行 SQL 的数据库软件 |
+
+XML 提供配置和 SQL，MyBatis 读取并处理它们。XML 文件本身不会执行查询。
+
+SQL 也可以写在注解里：
+
+```java
+@Select("select * from employee where username = #{username}")
+Employee getByUsername(String username);
+```
+
+这里仍然使用 MyBatis，只是 SQL 的来源不是 XML。
+
+### 3.2 Java 方法如何对应 XML
+
+Java 接口方法：
+
+```java
+Page<Employee> pageQuery(EmployeePageQueryDTO employeePageQueryDTO);
+```
+
+XML：
+
+```xml
+<mapper namespace="com.sky.mapper.EmployeeMapper">
+    <select id="pageQuery" resultType="com.sky.entity.Employee">
+        select * from employee
+    </select>
+</mapper>
+```
+
+- `namespace` 对应接口的完整名称。
+- `id="pageQuery"` 对应接口方法名。
+- `resultType` 表示查询中每条记录转换为 `Employee`，不是表示整个分页容器。
+
+在 XML 被正确加载的前提下，通过这些配置建立对应关系，不是只凭 XML 文件名。
+
+Service 的 `pageQuery` 与 Mapper 的 `pageQuery` 是不同对象的方法，名字相同不代表同一个方法：
+
+```java
+employeeService.pageQuery(dto); // Controller 调用业务
+employeeMapper.pageQuery(dto);  // Service 调用数据访问
+```
+
+### 3.3 #{name} 是参数占位
+
+```sql
+SELECT * FROM employee WHERE name = #{name}
+```
+
+左边的 `name` 是数据库列；右边 `#{name}` 表示传入参数中的姓名值。
+
+可以简化理解为 SQL 和参数分开提供：
+
+```sql
+SELECT * FROM employee WHERE name = ?
+```
+
+```text
+第1个参数：张三
+```
+
+MyBatis 配合数据库驱动完成绑定，不需要自己把用户输入拼接进 SQL。
+
+## 4. 动态 SQL
+
+动态 SQL：根据传入参数，决定 SQL 包含哪些条件或更新字段。
+
+### 4.1 动态查询条件
+
+```xml
+select * from employee
+<where>
+    <if test="name != null and name != ''">
+        and name like concat('%', #{name}, '%')
+    </if>
+</where>
+order by create_time desc
+```
+
+- `name` 是 DTO 中的属性；当前是单个 DTO 参数，可以直接访问其属性。
+- 未提供姓名：不加姓名条件。
+- 提供姓名“张”：加入包含“张”的筛选。
+- `concat('%', 参数, '%')` 组合匹配模式；`LIKE` 中 `%` 表示任意数量的字符。
+- `<where>` 在有条件时生成 `WHERE`，处理开头多余的 `AND`。
+
+判断姓名是否为空，是检查传入参数，不需要先查询数据库。
+
+### 4.2 动态更新字段
+
+```xml
+update employee
+<set>
+    <if test="name != null">
+        name = #{name},
+    </if>
+    <if test="phone != null">
+        phone = #{phone},
+    </if>
+    <if test="status != null">
+        status = #{status},
+    </if>
+</set>
+where id = #{id}
+```
+
+`<set>` 生成 `SET`，处理末尾多余的逗号。只提供手机号时，业务字段更新效果就是修改手机号；提供状态时，就更新状态。
+
+**不是 null，不等于用户改过。** 前端把原来的姓名也提交回来，当前判断仍会把姓名加入更新，并不会自动比较新旧值。
+
+| 值 | 当前 `!= null` 判断下的含义 |
+| --- | --- |
+| `null` | 跳过这个字段 |
+| `""` | 空字符串，但不是 null，仍可能写入 |
+| `0` | 明确数值，不是 null，例如禁用状态 |
+
+`#{...}` 负责参数值；`<if>` 决定 SQL 片段是否出现。MyBatis 处理这些标签，数据库最终收到普通 SQL，不会收到 XML 标签。
+
+## 5. 启用、禁用员工
+
+`status=1` 表示启用，`status=0` 表示禁用。禁用是修改字段，不是删除员工。
+
+后端请求示例：
+
+```text
+POST /admin/employee/status/0?id=8
+```
+
+- 路径中的 `0`：要改成的目标状态。
+- 查询参数 `id=8`：要修改谁。
+- POST 也可以带查询参数。
+
+Controller 使用 `@PathVariable` 读取路径状态，Service 构造数据：
+
+```java
+Employee employee = Employee.builder()
+        .status(status)
+        .id(id)
+        .build();
+employeeMapper.update(employee);
+```
+
+创建 Java 对象不等于新增数据库记录；这里调用 `update` 执行修改。主要业务效果为：
+
+```sql
+UPDATE employee SET status = 0 WHERE id = 8;
+```
+
+`WHERE` 决定修改哪些记录，遗漏条件可能更新整张表。公共字段自动填充还会补充修改时间和修改人。
+
+前端应检查保存结果，成功后刷新列表；失败不能假装成功。账号禁用会被当前登录逻辑检查，但已经签发的 token 是否立即失效，取决于后续身份校验机制。
+
+## 6. 编辑员工：查询、回显、保存
+
+### 6.1 两次请求
+
+```text
+点击编辑，取得员工ID
+  → GET 查询详情
+  → 回显到表单
+  → 用户修改输入
+  → PUT 提交表单
+  → 后端更新数据库
+```
+
+后端接口：查询 `GET /admin/employee/8`，保存 `PUT /admin/employee`。
+
+回显就是把已有信息填回输入框。ID 通常不作为可编辑输入框展示，但要保留并随保存提交，供后端确定修改哪一行。
+
+只修改 Vue 表单数据，还没有修改数据库；点击保存并成功执行后端更新后，数据库才改变。
+
+### 6.2 属性复制
+
+```java
+Employee employee = new Employee();
+BeanUtils.copyProperties(employeeDTO, employee);
+employeeMapper.update(employee);
+```
+
+`copyProperties(来源对象, 目标对象)` 把名称相同、类型兼容的属性复制过去。可以近似理解为多次 `employee.setName(dto.getName())` 等赋值。
+
+它不会查询或更新数据库，也不会自动验证姓名、手机号是否合法。真正触发更新的是 Mapper 调用。
+
+当前员工 DTO 包含 id、username、name、phone、sex、idNumber，不包含密码与账号状态；状态通过专门接口修改。
+
+### 6.3 和状态修改复用同一个 Mapper
+
+编辑提交姓名、手机号等属性；禁用提交 ID、状态。两者都调用 `employeeMapper.update(employee)`，由动态 SQL 决定更新哪些字段。
+
+查询回显是为了让用户看到旧内容。当前保存代码并没有自动比较新旧数据。需要校验必填字段，不能只依靠 XML 的非 null 判断。
+
+验收：修改后保存，重新查询，确认新值确实持久化；只在页面上看到新值不够。
+
+## 7. 分类、套餐、表关联与删除
+
+### 7.1 分类不是套餐
+
+| 概念 | 例子 |
+| --- | --- |
+| 菜品分类 | 热菜、饮品 |
+| 菜品 | 宫保鸡丁、柠檬茶 |
+| 套餐分类 | 单人套餐、双人套餐 |
+| 套餐 | 宫保鸡丁＋米饭＋柠檬茶组合售卖 |
+
+`category.type=1` 是菜品分类，`type=2` 是套餐分类。商品属于哪个分类，与套餐中包含哪些菜品，是两种关系。
+
+### 7.2 用编号关联
+
+分类表示例：
+
+| id | name |
+| --- | --- |
+| 1 | 热菜 |
+| 2 | 饮品 |
+
+菜品表示例：
+
+| id | name | category_id |
+| --- | --- | --- |
+| 101 | 宫保鸡丁 | 1 |
+| 102 | 鱼香肉丝 | 1 |
+| 103 | 柠檬茶 | 2 |
+
+宫保鸡丁自己的编号是 101，所属分类编号是 1。一个分类对应多道菜，是一对多关系。
+
+有 `category_id` 这个关联字段，不代表数据库一定配置了外键约束，需要另查表结构确认。
+
+### 7.3 删除前先检查
+
+删除“热菜”分类不是直接删除其中所有菜品。当前项目的规则：有任何关联菜品或套餐，拒绝删除分类。
+
+```java
+// 简化示例：变量名和错误文字为了便于阅读而调整
+public void deleteById(Long id) {
+    Integer dishCount = dishMapper.countByCategoryId(id);
+    if (dishCount > 0) {
+        throw new DeletionNotAllowedException("分类下还有菜品");
+    }
+
+    Integer setmealCount = setmealMapper.countByCategoryId(id);
+    if (setmealCount > 0) {
+        throw new DeletionNotAllowedException("分类下还有套餐");
+    }
+
+    categoryMapper.deleteById(id);
+}
+```
+
+检查菜品的 SQL：
+
+```sql
+SELECT COUNT(id) FROM dish WHERE category_id = 1;
+```
+
+`count=2` 表示还有两道菜使用这个分类。`throw` 中断当前正常流程，后面的删除不再执行。项目的全局异常处理器把业务异常转换为 `Result.error(...)`，前端据此显示原因。
+
+两项检查都为 0，才执行：
+
+```sql
+DELETE FROM category WHERE id = 1;
+```
+
+这解释的是当前实现的基本业务流程，不代表仅靠“先检查、后删除”就已解决并发修改下的一切一致性问题。
+
+### 7.4 这是不是多表查询
+
+当前删除流程涉及多张表，但分别执行单表统计和删除，没有使用 JOIN 联表查询。
+
+“表有关联”描述数据关系；“JOIN 联表查询”描述查询方式。例如同时获取菜名和分类名：
+
+```sql
+SELECT dish.name, category.name AS category_name
+FROM dish
+JOIN category ON dish.category_id = category.id;
+```
+
+这里一条 SQL 使用两张表的数据，才是本次讲解中所说的联表查询。
+
+## 8. 公共字段自动填充：当前学习位置
+
+### 8.1 四个公共字段
+
+| Java 属性 | 数据库列 | 含义 |
+| --- | --- | --- |
+| createTime | create_time | 创建时间 |
+| createUser | create_user | 创建人 |
+| updateTime | update_time | 最近修改时间 |
+| updateUser | update_user | 最近修改人 |
+
+新增时初始化四个字段，修改时只更新后两个。不能每次修改都覆盖原来的创建信息。
+
+管理员 1 修改员工 8 时：`employee.id=8`，`employee.updateUser=1`。被修改的人与操作人不是同一个概念。
+
+### 8.2 BaseContext 是什么
+
+BaseContext 是项目自定义工具类，临时保存和读取当前处理线程中的登录人 ID，不是数据库表。
+
+```java
+BaseContext.setCurrentId(empId);       // 保存登录人ID
+Long currentId = BaseContext.getCurrentId(); // 读取
+```
+
+```text
+后端校验 token
+  → 取出登录员工ID
+  → 存入 BaseContext
+  → 业务或自动填充代码读取
+```
+
+内部使用 `ThreadLocal<Long>`，不同线程各自保存值。它不是按用户永久保存，也不是天然的跨线程会话存储。
+
+请求完成后应清理，线程复用时不能遗留旧身份；异步线程也不会默认获得原线程的值。当前工具类提供 `removeCurrentId()`，但已查看的管理端 JWT 拦截器没有展示请求结束时调用清理的代码，不能仅凭方法存在就认为清理已落实。
+
+### 8.3 自动填充如何执行
+
+更新 Mapper 方法有标记：
+
+```java
+@AutoFill(value = OperationType.UPDATE)
+void update(Employee employee);
+```
+
+新增对应 `OperationType.INSERT`。注解只是说明要做什么，真正处理的是 `AutoFillAspect`。
+
+项目用 Spring AOP 在选定方法执行前加入统一步骤。当前选择条件是 `com.sky.mapper` 包中的方法且带有 `@AutoFill` 注解。
+
+```java
+@Before("autoFillPointCut()")
+public void autoFill(JoinPoint joinPoint) {
+    // 执行公共字段填充
+}
+```
+
+`@Before` 表示先执行填充，再继续目标 Mapper 调用。
+
+### 8.4 怎么拿到要填充的对象
+
+```java
+Object[] args = joinPoint.getArgs();
+Object entity = args[0];
+```
+
+`getArgs()` 取得本次方法调用的参数；`args[0]` 是第一个参数。
+
+例如 `employeeMapper.update(employee)` 的第一个参数就是 `employee`。这里拿到同一个对象，不是重新查数据库或复制出的对象。
+
+当前设计约定：标记的方法第一个参数是待填充的实体，并提供相应 setter。不能把标记随便加在参数不符合约定的方法上。
+
+### 8.5 反射在这里的用途
+
+填充代码通过反射，在运行时找到实体的 setter 并调用它。对于更新员工，执行效果相当于：
+
+```java
+employee.setUpdateTime(LocalDateTime.now());
+employee.setUpdateUser(BaseContext.getCurrentId());
+```
+
+传入分类或菜品对象时，使用同一套公共逻辑找到对应方法。下面 8.7 只解释本项目中的查找与调用，不要求背诵反射 API。
+
+### 8.6 完整执行链
+
+```text
+Service 准备对象：id=8，phone=新手机号
+  → 调用带 @AutoFill(UPDATE) 的 Mapper 方法
+  → AOP 前置处理取得这个对象
+  → 读取当前时间和 BaseContext 中的操作人ID
+  → 给同一个对象补上 updateTime、updateUser
+  → Mapper / MyBatis 执行 SQL
+  → 手机号、修改时间、修改人一起入库
+```
+
+自动填充发生在 Java 对象上。SQL 也需要包含这些字段才能保存到数据库；本项目更新 XML 有相应字段处理。不是只加一个注解，数据库就会自行知道该存什么。
+
+### 8.7 小节补充：反射如何完成赋值
+
+教学场景：管理员1修改员工8的手机号。Service 准备的对象主要包含 `id=8` 和新手机号，随后调用 `employeeMapper.update(employee)`。
+
+前置处理通过 `args[0]` 得到同一个对象，并用变量 `entity` 引用它。`employee` 和 `entity` 是不同位置的变量名，此时指向同一个对象，不是两份独立数据。
+
+项目实际使用方法名常量，下面把常量展开为字符串，便于阅读：
+
+```java
+Method setUpdateTime = entity.getClass()
+        .getDeclaredMethod("setUpdateTime", LocalDateTime.class);
+
+setUpdateTime.invoke(entity, now);
+```
+
+分两步理解：
+
+1. `entity.getClass()` 获取对象的实际类型，本次是 Employee。
+2. `getDeclaredMethod(...)` 在该类型中查找名为 `setUpdateTime`、参数类型为 LocalDateTime 的方法。这里只查找，还没有赋值。
+3. `invoke(entity, now)` 在这个对象上调用找到的方法，把 now 作为参数传入；此时完成对象属性赋值。
+
+对于 Employee 对象，这两句执行效果相当于 `employee.setUpdateTime(now)`。`Method` 对象可以理解为对“找到的那个方法”的描述，不能误认为已经更新了时间。
+
+```java
+Method setUpdateUser = entity.getClass()
+        .getDeclaredMethod("setUpdateUser", Long.class);
+
+setUpdateUser.invoke(entity, currentId);
+```
+
+第二组赋值效果相当于 `employee.setUpdateUser(currentId)`。当前操作人是1，因此填入1，而不是被修改员工的8。
+
+之所以使用反射，是为了让同一段代码根据实际对象找到对应 setter，服务员工、分类、菜品等不同类型。当前方案要求这些实体提供约定的方法；不是任意对象都能自动填充，也不是所有自动填充方案都必须使用反射。
+
+填充前后：
+
+```text
+填充前：id=8，phone=新手机号
+填充后：id=8，phone=新手机号，updateTime=当前时间，updateUser=1
+```
+
+### 8.8 小节补充：赋值和入库是两件事
+
+```text
+Service 组织业务数据
+  → AOP 给同一对象补充属性
+  → Mapper 的动态 SQL 读取这些属性
+  → 数据库执行 UPDATE
+```
+
+`invoke` 调用的是 Java setter，只修改内存对象；真正写入数据库需要后续 SQL 执行。对开启事务的操作，最终持久化还取决于事务成功提交，事务会在菜品业务中进一步讲解。
+
+本次是 UPDATE，填充代码只更新 updateTime、updateUser，保留数据库中的创建信息。需要同时具备匹配的方法标记、符合约定的实体、当前操作人来源，以及包含公共字段的 SQL，才能实现预期效果。
+
+小练习：
+
+- 只执行 `getDeclaredMethod`，修改时间改变了吗？答：没有，只找到了方法。
+- 执行 `invoke` 后，数据库就更新了吗？答：没有，只修改了 Java 对象，还需执行更新 SQL。
+- 管理员1修改员工8，`WHERE id` 和 `update_user` 分别是什么？答：8 和1。
+
+## 9. 用 AI 开发时，自己负责什么
+
+### 9.1 描述一个可验收的需求
+
+说明功能、已有接口、修改范围、业务规则和验证场景。例如：
+
+```text
+完善当前员工分页查询，沿用现有技术栈。
+按姓名模糊搜索，搜索条件变化时回到第1页。
+后端限制分页参数，明确缺省值和最大条数。
+响应只包含页面需要的员工字段。
+前端处理加载、空结果和失败，旧搜索结果不能覆盖新搜索。
+保留登录校验，先检查已有实现，再补齐缺失部分。
+完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
+```
+
+### 9.2 验收比“代码能运行”多一步
+
+| 功能 | 核心验证 |
+| --- | --- |
+| 登录 | 正确密码成功，错误密码失败，无有效凭证不能访问受保护接口 |
+| 分页 | 第一页、最后一页、空结果、搜索后翻页，total 与 records 含义正确 |
+| 编辑 | 正确回显、保留ID、取消不保存、保存后重新查询确认 |
+| 状态修改 | 目标员工与目标状态正确，失败不能假装成功 |
+| 删除分类 | 有关联拒绝，无关联允许，失败原因能显示 |
+| 自动填充 | 操作人正确，更新时间变化，创建信息保留 |
+
+前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
+
+## 10. 自测与答案
+
+先自行回答，再展开答案。
+
+1. 符合条件的员工共有47名，每页10名，查第4页：offset、total、本页条数、总页数、最后一页条数分别是多少？
+2. `PageHelper.startPage(2, 10)` 是否已经查询了数据库？`new PageResult(...)` 会不会再查询？
+3. MyBatis 是不是 XML 文件？通过什么把 Mapper 方法和 XML SQL 对应起来？
+4. `name != null` 是否能判断用户改过姓名？能否拒绝空字符串？
+5. 菜品编号101、category_id=1，两个数字分别表示什么？
+6. 删除分类时先统计菜品和套餐数量，这是否使用了 JOIN？
+7. 管理员1修改员工8，updateUser 应该是1还是8？
+8. 为什么 Service 没写 setUpdateTime，数据库仍可能保存了修改时间？
+
+<details>
+<summary>展开答案</summary>
+
+1. offset=30，`LIMIT 30, 10`；total=47；本页10条；共5页；最后一页7条。
+2. startPage 设置要求，Mapper 调用触发查询；PageResult 只是结果包装。
+3. MyBatis 是框架。XML 的 namespace 对应接口完整名称，select/update 等语句的 id 对应方法名。
+4. 都不能。原值非 null 也会更新；空字符串也不是 null，需要另行校验。
+5. 101 是菜品自己的编号，1 是所属分类编号。
+6. 没有，是多次单表操作；业务涉及多张表不等于使用 JOIN。
+7. 1，表示操作人；WHERE 中用于定位被修改员工的 id 是8。
+8. AOP 在 Mapper 执行前给同一实体补充字段，Mapper SQL 再把字段写入数据库。
+
+</details>
+
+## 课程顺序与资料
+
+按黑马官方大纲组织；以下是后续顺序，不代表已完成。
+
+| 顺序 | 主题 |
+| --- | --- |
+| Day 1 | 项目介绍、环境搭建 |
+| Day 2 | 员工、分类管理 |
+| Day 3 | 菜品管理，包括公共字段自动填充等 |
+| Day 4 | 套餐管理实战 |
+| Day 5 | 店铺营业状态 |
+| Day 6 | 微信登录、商品浏览 |
+| Day 7 | 商品缓存、购物车 |
+| Day 8 | 下单、支付 |
+| Day 9 | 历史订单、订单管理实战 |
+| Day 10 | 定时处理订单、来单提醒、催单 |
+| Day 11 | 图形报表 |
+| Day 12 | Excel 报表 |
+
+[黑马官方课程大纲](https://xa.itheima.com/news/20230706/181545.html)。本项目增加的 AI 客服、知识库和慢 SQL 监控放在业务基础之后；当前客服主要是本地规则和关键词识别，不应直接等同于已经完成大模型工具调用。
+
+### 对照项目代码
+
+- [员工接口 Controller](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/admin/EmployeeController.java)
+- [员工业务 Service](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/EmployeeServiceImpl.java)
+- [员工 Mapper 接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/EmployeeMapper.java)
+- [员工 Mapper XML](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/EmployeeMapper.xml)
+- [分页参数 DTO](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/EmployeePageQueryDTO.java)
+- [分页返回对象](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/result/PageResult.java)
+- [已有前端接口练习](D:/sky-take-out/sky-take-out/frontend-learning/05-components/src/components/LoginPanel.vue)
+- [分类业务 Service](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/CategoryServiceImpl.java)
+- [自动填充注解](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/annotation/AutoFill.java)
+- [自动填充切面](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/aspect/AutoFillAspect.java)
+- [BaseContext](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/context/BaseContext.java)
+- [管理端登录校验](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/interceptor/JwtTokenAdminInterceptor.java)
+- [全局异常处理](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/handler/GlobalExceptionHandler.java)
+
+### 已有学习资料
+
+- [员工分页接口文档](D:/sky-take-out/sky-take-out/docs/learning/01-employee-page-api.md)
+- [前端学习路线](D:/sky-take-out/sky-take-out/docs/learning/02-frontend-learning-path.md)
