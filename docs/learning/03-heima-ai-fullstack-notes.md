@@ -28,7 +28,7 @@
 | 16 | 使用 AI 开发时的验收方法 |
 | 17 | 自测题与答案 |
 
-当前进度：2026-10-19，进入黑马 Day 5 第一小节（第15节）：用店铺营业状态理解 Redis 是独立的数据存储服务、key/value、管理端写入与两端读取同一个状态，以及缺失时默认打烊。下一小节可以拆解 RedisTemplate 读写与 Redis 数据类型；缓存菜品在后续阶段讲。尚未运行 Redis 命令或修改真实店铺状态。
+当前进度：2026-10-19，Day 5已讲店铺状态键值读写；本节补充15.7、15.8，区分 Redis服务、Java中的RedisTemplate工具、SHOP_STATUS键，并理解链式调用、Spring创建与注入模板、类型转换及连接失败的定位。下一小节可继续Redis数据类型或过期时间，缓存菜品按后续课程展开。尚未运行Redis命令或修改真实状态。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2158,6 +2158,88 @@ Redis 可以配置持久化，不要简单记成重启必然清空；也不要�
 当前项目只用一个固定SHOP_STATUS键代表全店状态；多店铺场景需按店铺区分键，是后续设计问题。方法没有在本节展示完整输入合法值校验，不能把任意整数自动视为合法状态。
 
 小练习：管理员写入 SHOP_STATUS=0，顾客查询同一个key得到什么？答案：0，页面按项目约定显示打烊。只修改前端文字、没有发请求写入 Redis，会改变服务端状态吗？不会。
+
+### 15.7 Redis、RedisTemplate 与 key 分别是什么
+
+| 名称 | 是什么 | 本例的职责 |
+| --- | --- | --- |
+| Redis | 独立运行的数据存储服务 | 实际保存SHOP_STATUS对应的值 |
+| RedisTemplate | Java应用中的访问工具对象 | 把代码中的读写操作交给Redis |
+| SHOP_STATUS | 一个字符串形式的数据名称，即key | 指定要读写哪项数据 |
+
+```text
+Controller中的Java代码
+    → 使用RedisTemplate
+    → 通过连接访问Redis服务
+    → 读写SHOP_STATUS对应的值
+```
+
+创建RedisTemplate对象不会自动安装或启动Redis，模板不是Redis数据库本身。Redis没启动或连接配置有误时，不能靠new一个模板让数据自动保存成功。
+
+#### 把链式调用拆开看
+
+```java
+redisTemplate.opsForValue().set(CacheConstant.SHOP_STATUS, status);
+```
+
+opsForValue() 先提供字符串类型值的操作接口，set再执行具体写入。用分两行的方式理解，节选需相应导入ValueOperations：
+
+```java
+ValueOperations operations = redisTemplate.opsForValue();
+operations.set(CacheConstant.SHOP_STATUS, status);
+```
+
+这是对现有原始类型RedisTemplate用法的解释，不是本节修改实现或推荐所有新代码都省略泛型。单独调用opsForValue()不会读取或写入SHOP_STATUS；具体操作由后面的get或set触发。
+
+opsForValue是入口方法名，不是数据库key；SHOP_STATUS才是传给get/set定位数据的key。
+
+#### RedisTemplate从哪里来
+
+当前 RedisConfiguration 通过@Bean声明创建模板：
+
+```java
+@Bean
+public RedisTemplate redisTemplate(RedisConnectionFactory factory) {
+    RedisTemplate template = new RedisTemplate();
+    template.setConnectionFactory(factory);
+    template.setKeySerializer(new StringRedisSerializer());
+    return template;
+}
+```
+
+这里为便于阅读调整了局部变量名。连接工厂提供访问Redis的连接能力；key序列化器规定如何把Java中的key编码成Redis使用的数据。new模板只是创建访问工具，不是创建一台Redis服务。
+
+Spring根据配置创建并管理模板对象。Controller通过：
+
+```java
+@Autowired
+private RedisTemplate redisTemplate;
+```
+
+取得Spring管理的模板，因此每次处理请求时不必自己创建一套工具。@Autowired不是从Redis里读取数据；真正读取仍需get调用。
+
+### 15.8 读取结果与最基本的排错
+
+当前代码使用原始类型RedisTemplate，读取结果按Object处理，所以写了显式转换：
+
+```java
+Integer status = (Integer) redisTemplate.opsForValue()
+        .get(CacheConstant.SHOP_STATUS);
+```
+
+可以读成：按key读取值，将返回对象当作Integer使用，再赋给status。这不是把任意字符串“1”解析成整数；存取的数据类型和序列化方式需要配套。不存在时可以得到null，随后走业务默认打烊逻辑。
+
+该配置只显式设置了key序列化，没有把value配置成字符串序列化。不要据此假定Java写入的Integer与手工redis-cli SET写入字符串完全相同；具体序列化细节下一阶段按需展开。
+
+| 现象 | 先检查什么 |
+| --- | --- |
+| 读取正常但值是null | key是否写入、读写key是否一致、是否连接同一实例和逻辑库 |
+| Redis连接异常 | 服务是否启动、地址端口和认证配置、网络连接 |
+| 值类型转换或反序列化失败 | 写入方类型与序列化器是否和读取方配套 |
+
+连接失败不是“key不存在”。Controller的null判断不能自动修复连接错误。本节只解释代码，没有启动Redis或执行测试。
+
+小练习：只写@Autowired RedisTemplate而不调用get，是否已经读取营业状态？答案：没有，取得的是操作工具。只调用opsForValue()是否已写入值？也没有，具体写入要执行set。
 
 ## 16. 用 AI 开发时，自己负责什么
 
