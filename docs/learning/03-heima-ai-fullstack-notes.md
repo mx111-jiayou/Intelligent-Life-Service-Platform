@@ -21,10 +21,11 @@
 | 9 | 图片上传：文件、OSS、图片地址与菜品保存 |
 | 10 | 新增菜品：菜品与口味分表保存 |
 | 11 | 菜品分页查询：LEFT JOIN、分类名称与 DishVO |
-| 12 | 使用 AI 开发时的验收方法 |
-| 13 | 自测题与答案 |
+| 12 | 批量删除菜品：状态检查、套餐关联、口味清理与事务 |
+| 13 | 使用 AI 开发时的验收方法 |
+| 14 | 自测题与答案 |
 
-当前进度：2026-10-19，新增菜品与事务已讲解，现进入菜品分页查询的联表部分（第11节）：根据 category_id 找分类名称，理解表别名、LEFT JOIN、ON 和结果列别名 categoryName，再接回 PageHelper 与 DishVO。这里仅阅读代码并讲解，尚未实际执行联表查询或事务回滚测试。
+当前进度：2026-10-19，菜品分页联表已讲解。本节进入第12节批量删除菜品：先检查是否在售、是否被套餐使用，再删除菜品及其口味，理解 IN 和共同事务。后续可继续菜品编辑与口味更新。这里仅阅读代码并讲解，没有实际删除业务数据或验证回滚。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1468,9 +1469,101 @@ return new PageResult(page.getTotal(), page.getResult());
 
 小练习：dish.id=100、dish.category_id=2，分类表 id=2 的名称为“饮品”，查询得到的 categoryName 是什么？答案：饮品。匹配依据是 category_id=2，不是菜品编号100。
 
-## 12. 用 AI 开发时，自己负责什么
+## 12. 批量删除菜品
 
-### 12.1 描述一个可验收的需求
+### 12.1 先决定能不能删
+
+项目的规则是：起售中的菜品不能直接删除；被套餐使用的菜品也不能删除。两项检查都通过，才删除菜品及其附属口味配置。
+
+假设删除宫保鸡丁，编号100。它可能存在三种情况：
+
+| 情况 | 当前业务处理 |
+| --- | --- |
+| 正在起售 | 拒绝删除，需要先停售 |
+| 已停售，但被某个套餐包含 | 拒绝删除，需要先处理套餐关联 |
+| 已停售，且不被套餐使用 | 可以进入删除步骤 |
+
+不是把状态改成0就已经删除了。停售仍保留菜品记录；删除才从菜品表移除记录。
+
+### 12.2 套餐关联保存在哪里
+
+套餐可能包含多道菜，同一道菜也可能被多个套餐使用。项目用 setmeal_dish 表记录这种包含关系，先理解两个编号即可：
+
+| setmeal_id：套餐编号 | dish_id：菜品编号 |
+| --- | --- |
+| 20 | 100 |
+| 20 | 101 |
+
+示例表示套餐20包含菜品100和101。菜品100若被直接删除，套餐中就缺少对应商品，因此当前项目先拒绝删除。
+
+检查代码：
+
+```java
+List<Long> setmealIds = setmealDishMapper.getSetmealIdsByDishIds(ids);
+if (setmealIds != null && setmealIds.size() > 0) {
+    throw new DeletionNotAllowedException(
+        MessageConstant.DISH_BE_RELATED_BY_SETMEAL
+    );
+}
+```
+
+查到任何套餐编号，就表示待删除菜品中存在被套餐使用的菜品。这里不只检查套餐当前是否起售，查询的是包含关系是否存在。
+
+### 12.3 为什么口味跟着删除，套餐却阻止删除
+
+口味配置是菜品的附属数据。例如宫保鸡丁已删除，它的辣度配置没有独立保留的用途，所以一并清理。
+
+套餐是另一个独立售卖的商品。当前规则不允许因为删除其中一道菜就顺便删除整个套餐，而是先拒绝操作，让商家处理套餐关联。
+
+因此，同样是关联数据，处理方式取决于业务关系，不能一概认为“有关联就全删”或“有关联就全部不能删”。
+
+### 12.4 ids 与 IN
+
+Controller 接收 List<Long> ids，可包含多个菜品编号。后端请求示例：
+
+```text
+DELETE /admin/dish?ids=100,101
+```
+
+SQL 使用 IN 表达匹配其中任意编号：
+
+```sql
+DELETE FROM dish WHERE id IN (100, 101);
+DELETE FROM dish_flavor WHERE dish_id IN (100, 101);
+```
+
+第一条按菜品自己的 id 删除；第二条按口味所属菜品的 dish_id 删除，不能错用口味记录自己的 id。上述 SQL 为具体值示意，项目 XML 用 foreach 与参数绑定生成编号列表。
+
+### 12.5 对照实际 Service 流程
+
+```text
+收到 ids
+  → 循环查询每道菜，发现起售状态则抛出异常
+  → 查询是否存在套餐包含这些菜品，存在则抛出异常
+  → dishMapper.deleteByIds(ids)
+  → dishFlavorMapper.deleteByDishIds(ids)
+```
+
+当前方法先完成全部状态检查，再执行删除。若100已停售但101仍在售，本次批量删除会被拒绝，不会先删100再跳过101。
+
+两次删除的实际代码：
+
+```java
+dishMapper.deleteByIds(ids);
+dishFlavorMapper.deleteByDishIds(ids);
+```
+
+`deleteBatch` 方法上已有 `@Transactional`。在事务正常生效且异常符合回滚规则时，两步删除共同提交；如果第二步失败，本事务中的第一步删除也回滚，避免只删掉菜品、遗留口味记录。
+
+这里按当前代码解释先删菜品再删口味的顺序；若其他项目配置了限制性外键，删除顺序需配合数据库约束，不能把当前顺序直接当作所有项目的固定规则。当前代码还需要根据完整需求核对参数非空、菜品不存在等边界，本节没有修改业务实现。
+
+Controller 在 Service 返回后清理相关缓存；缓存的用途与更新策略在后续 Redis 课程中讲解。删除数据库记录也不意味着 OSS 中的图片文件会自动删除。
+
+小练习：菜品100已停售且没有套餐关联，删除它时口味表应该用 `id=100` 还是 `dish_id=100` 定位？答案：dish_id=100，因为口味记录自己的主键是另一个编号。
+
+## 13. 用 AI 开发时，自己负责什么
+
+### 13.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -1484,7 +1577,7 @@ return new PageResult(page.getTotal(), page.getResult());
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 12.2 验收比“代码能运行”多一步
+### 13.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -1497,7 +1590,7 @@ return new PageResult(page.getTotal(), page.getResult());
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 13. 自测与答案
+## 14. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -1569,6 +1662,7 @@ return new PageResult(page.getTotal(), page.getResult());
 - [口味批量插入](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/DishFlavorMapper.xml)
 - [菜品展示对象 DishVO](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/vo/DishVO.java)
 - [菜品分页参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/DishPageQueryDTO.java)
+- [套餐与菜品的关联查询](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/SetmealDishMapper.xml)
 
 ### 已有学习资料
 
