@@ -25,10 +25,11 @@
 | 13 | 编辑菜品：回显口味、替换口味列表与事务边界 |
 | 14 | Day 4 套餐管理：套餐、菜品与关联表 |
 | 15 | Day 5 店铺营业状态与 Redis 入门 |
-| 16 | 使用 AI 开发时的验收方法 |
-| 17 | 自测题与答案 |
+| 16 | Day 6 微信登录：code、openid、本地用户与token |
+| 17 | 使用 AI 开发时的验收方法 |
+| 18 | 自测题与答案 |
 
-当前进度：2026-10-19，Redis过期时间已讲解。用户追问“为什么读取不会更新过期时间”，本节在15.13区分普通GET读取、剩余时间减少与到期时刻延后，并说明需要显式续期、不同业务采取不同期限策略。确认理解后再按课程顺序进入Day 6。尚未运行Redis命令或改变真实数据。
+当前进度：2026-10-19，进入黑马Day 6第一小节（第16节）微信登录：小程序提交code，后端向微信换openid，再查找或创建本地用户，最后签发本系统token。先理解角色与凭证区别，下一小节展开getOpenid中的HTTP调用。已核对源码，尚未实际微信登录联调；在线微信官方文档本次因访问限制未能核验。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2395,9 +2396,100 @@ redisTemplate.expire(key, 30, TimeUnit.MINUTES);
 
 小练习：10:00设置30分钟，10:20执行get，TTL应该重置为30分钟吗？答：不会，约剩10分钟；只有显式续期等修改期限的操作才会改变到期时刻。
 
-## 16. 用 AI 开发时，自己负责什么
+## 16. Day 6：微信登录
 
-### 16.1 描述一个可验收的需求
+### 16.1 先区分参与者
+
+前面的员工登录是在商家后台提交账号密码；这里讨论顾客进入微信小程序时，利用微信提供的登录能力确认身份。
+
+| 参与者 | 负责什么 |
+| --- | --- |
+| 微信小程序前端 | 调用微信登录能力取得临时code，提交给本项目后端 |
+| 本项目后端 | 向微信换取用户标识，查找或创建本地用户，签发token |
+| 微信服务端 | 根据小程序身份信息与登录凭证返回该用户标识等结果 |
+| MySQL | 保存本项目的用户记录 |
+
+按标准小程序流程，前端使用wx.login取得临时code。当前仓库已阅读部分重点是Java后端，不声称已经检查到或运行了完整小程序登录代码。
+
+### 16.2 整体流程
+
+```text
+用户进入微信小程序
+  → 小程序通过微信登录能力取得临时code
+  → 小程序调用本项目 POST /user/user/login，提交code
+  → 后端调用微信服务端，用code等参数换取openid
+  → 后端按openid查询MySQL用户表
+      → 找到：使用已有用户
+      → 没找到：创建用户记录，完成本系统首次注册
+  → 后端按本地用户ID生成JWT
+  → 将id、openid、token返回小程序
+  → 后续请求携带本系统token
+```
+
+这是一次前端登录请求内部又调用第三方服务的例子。后端除了访问MySQL、Redis，也可以通过HTTP访问别人的接口。
+
+### 16.3 code、openid、id、token分开记
+
+| 名称 | 本例中的作用 |
+| --- | --- |
+| code | 前端从微信取得并交给后端的临时登录凭证，用于换取登录结果 |
+| openid | 微信用户相对于该小程序的标识，后端用于匹配本地账号 |
+| user.id | 本项目MySQL用户表的主键，例如7，用于订单等业务关联 |
+| token | 本项目后端生成的登录凭证，后续访问本系统接口时携带 |
+
+不是所有系统中某人的openid都相同，不要把它当成跨所有微信应用的统一编号。示例openid仅作为标识字符串理解，不要求背格式。
+
+code不是后续一直复用的本系统token，openid也不应由客户端随意声称后直接被信任。当前后端通过向微信服务端发起请求取得openid，而不是直接把前端提交的用户ID当作已验证身份。
+
+### 16.4 对照UserServiceImpl
+
+```java
+String openid = getOpenid(userLoginDTO.getCode());
+```
+
+先取出前端提交的code，交给getOpenid。实际方法通过HttpClientUtil调用 `https://api.weixin.qq.com/sns/jscode2session`，传入appid、secret、js_code和grant_type，解析返回JSON中的openid。具体参数与HTTP读取代码下一节展开，不在本节引入数值有效期等细节。
+
+如果没有取得openid，当前代码抛出LoginFailedException。取得后执行：
+
+```java
+User user = userMapper.getByOpenid(openid);
+if (user == null) {
+    user = User.builder()
+            .openid(openid)
+            .createTime(LocalDateTime.now())
+            .build();
+    userMapper.insert(user);
+}
+return user;
+```
+
+查的是本项目MySQL里的user表，不是再次查询微信用户列表。null表示本项目尚未记录这个openid，于是创建本地用户。当前UserMapper XML配置了生成主键回填，因此正常插入后user.id可用于生成token。
+
+已有记录则直接使用原来的user.id，不会每次登录都新增用户。先查再插入是否有并发重复注册问题，还取决于数据库唯一约束等，本节仅说明当前代码主线。
+
+### 16.5 Controller签发本系统token
+
+UserController先调用userService.wxLogin取得本地用户，然后把user.id放入JWT载荷，通过JwtUtil.createJWT生成本项目token，放进UserLoginVO返回。
+
+```text
+微信确认用户标识
+  → 映射为本地user.id
+  → 本项目签发token
+```
+
+不要把两层凭证混在一起：微信登录交换发生在前；后续业务身份校验使用项目自己的token。当前返回的VO含id、openid、token，不表示自动取得手机号或全部用户资料。
+
+### 16.6 阅读与验证范围
+
+本节依据UserServiceImpl、UserController、UserMapper及UserMapper.xml整理。未读取或展示真实小程序密钥，未向微信发起真实业务登录请求，也未改动用户数据。
+
+本次尝试访问微信官方登录与code2Session文档时工具返回访问限制，未取得页面正文，不能声称本节已核验最新平台规则。以下是后续查阅入口，不是本次成功读取的证据：[小程序登录流程](https://developers.weixin.qq.com/miniprogram/dev/framework/open-ability/login.html)、[code2Session接口](https://developers.weixin.qq.com/miniprogram/dev/OpenApiDoc/user-login/code2Session.html)。实际接入或调整参数时应再核对官方要求。
+
+小练习：顾客第一次登录已创建user.id=7，之后再次通过微信取得同一小程序下的相同openid，正常情况下本项目使用旧ID7还是新建ID？答案：使用已有ID7；本系统token可以重新签发，不意味着用户记录重建。
+
+## 17. 用 AI 开发时，自己负责什么
+
+### 17.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -2411,7 +2503,7 @@ redisTemplate.expire(key, 30, TimeUnit.MINUTES);
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 16.2 验收比“代码能运行”多一步
+### 17.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -2424,7 +2516,7 @@ redisTemplate.expire(key, 30, TimeUnit.MINUTES);
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 17. 自测与答案
+## 18. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -2504,6 +2596,10 @@ redisTemplate.expire(key, 30, TimeUnit.MINUTES);
 - [用户端店铺状态](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/ShopController.java)
 - [Redis 模板配置](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/config/RedisConfiguration.java)
 - [缓存键常量](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/constant/CacheConstant.java)
+- [微信登录业务](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/UserServiceImpl.java)
+- [用户登录接口与token生成](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/UserController.java)
+- [用户Mapper及openid查询](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/UserMapper.java)
+- [用户插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/UserMapper.xml)
 
 ### 已有学习资料
 
