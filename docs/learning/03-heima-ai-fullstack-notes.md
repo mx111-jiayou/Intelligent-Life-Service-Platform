@@ -26,7 +26,7 @@
 | 14 | 使用 AI 开发时的验收方法 |
 | 15 | 自测题与答案 |
 
-当前进度：2026-10-19，用户在 13.2 简化解释后确认可以理解“保留菜品100，用完整新口味列表替换旧口味列表”。下一步把更新菜品、删除旧口味、设置所属菜品ID并插入新口味这几步对应到代码。这里记录的是流程理解反馈，不代表已独立实现；没有修改业务代码或实际编辑数据。
+当前进度：2026-10-19，用户已确认理解菜品保留、口味整组替换的流程。本节在13.6对照实际 updateWithFlavor 代码：复制 DTO 到实体、UPDATE 菜品、按 dish_id 删除旧口味、取得完整新列表、设置原菜品ID并批量插入。这里是代码讲解，尚未取得对本节代码的理解反馈，也未修改业务实现或实际编辑数据。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1662,6 +1662,56 @@ dishFlavorMapper.deleteByDishId(dishDTO.getId());
 如果后续补齐该方法事务，应覆盖完整更新流程，而非只覆盖最后一次 INSERT，并验证正常保存、清空口味、保存失败时旧配置保留等场景。
 
 小练习：用户只把价格改成30元，辣度和忌口都应保留。提交 flavors 时应该带完整两组，还是空数组？答案：当前实现应带完整两组；空数组会清除配置。菜品ID仍是原ID，不需要新增一条菜品。
+
+### 13.6 对照代码：更新菜品 → 清理旧口味 → 保存新口味
+
+教学输入是编辑后提交的完整 DishDTO：id=100，菜名为宫保鸡丁，价格30元，flavors包含“辣度、分量”两组。后端不需要重新生成菜品ID，因为这次是编辑已有菜品。
+
+**先准备给 Mapper 的菜品对象。**
+
+```java
+Dish dish = new Dish();
+BeanUtils.copyProperties(dishDTO, dish);
+dishMapper.update(dish);
+```
+
+new Dish() 创建内存对象，不会新增数据库记录。属性复制后，这个对象具有 DTO 中的 id=100、price=30 等对应字段。update 根据这个ID修改原来的数据库记录；调用 insert 才是另一种数据库操作。不要把 Java 创建对象与数据库 INSERT 混为一谈。
+
+**再删除原菜品的旧口味。**
+
+```java
+dishFlavorMapper.deleteByDishId(dishDTO.getId());
+```
+
+先执行 getId() 取出100，再把100交给 Mapper。对应删除条件为 `dish_flavor WHERE dish_id = 100`，只清理该菜品的旧配置，不删除 dish 表的菜品100。这里的 getId() 是读取已经提交的ID，不是新增时的主键回填。
+
+**拿到这次提交的新列表，设置所属菜品ID，再保存。**
+
+```java
+List<DishFlavor> flavors = dishDTO.getFlavors();
+if (flavors != null && flavors.size() > 0) {
+    flavors.forEach(dishFlavor -> {
+        dishFlavor.setDishId(dishDTO.getId());
+    });
+    dishFlavorMapper.insertBatch(flavors);
+}
+```
+
+getFlavors() 从请求 DTO 取列表，并不查询数据库。forEach 依次为“辣度”和“分量”对象设置 dishId=100；setter 是内存赋值，不是 SQL。循环结束后的 insertBatch 才执行新口味的数据库插入。
+
+| 代码 | 对数据库的作用 |
+| --- | --- |
+| new Dish / copyProperties | 只准备内存数据 |
+| dishMapper.update | 修改已有菜品记录100 |
+| deleteByDishId | 删除该菜品旧的口味配置 |
+| getFlavors / setDishId | 读取请求列表并补充对象属性 |
+| insertBatch | 插入完整的新口味列表 |
+
+新菜品需要先插入并回填ID；编辑已有菜品直接使用提交的原ID。两者都会给口味设置所属菜品编号，但编号来源不同。
+
+本小节以实际方法为准，不在教学代码中虚构已有 @Transactional；当前更新方法的事务声明情况仍见13.5。此处展示调用职责与成功路径，没有实际执行数据库修改。
+
+小练习：为什么 updateWithFlavor 中出现 new Dish() 却没有新增一份宫保鸡丁？答案：new创建的是Java对象；数据库操作是update，按已有ID修改原记录。
 
 ## 14. 用 AI 开发时，自己负责什么
 
