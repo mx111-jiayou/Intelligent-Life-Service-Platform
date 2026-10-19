@@ -22,7 +22,7 @@
 | 10 | 使用 AI 开发时的验收方法 |
 | 11 | 自测题与答案 |
 
-当前讲解到 Day 3 的图片上传：用户反馈 OSS 仍不理解，因此补充 9.8 的生活化解释，先建立“本地图片 → OSS 文件 → 数据库记录地址 → 浏览器取图”的认识，再继续菜品新增与口味数据。自动填充的反射用途和执行链已讲解。本次仅阅读代码并整理笔记，没有实际上传文件或修改业务数据，也未验证当前 OSS 配置可用。
+当前讲解到 Day 3 的图片上传：用户已理解“OSS 存文件、数据库存地址”，本节按 photo.jpg 示例重新解释 Controller 与 OSS 工具代码，详见 9.9。下一阶段继续菜品新增与口味数据。自动填充的反射用途和执行链已讲解。本次仅阅读代码并整理笔记，没有实际上传文件或修改业务数据，也未验证当前 OSS 配置可用。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -828,6 +828,96 @@ OSS 是阿里云提供的一项文件存储服务，入门时可类比为“给�
 图片也可以放在自己的服务器或其他存储服务中，不是只能使用 OSS。当前项目选择 OSS，是让专门的存储服务保存图片。数据库技术上可以保存二进制内容，但本项目采用“数据库存地址、OSS 存文件”的设计。
 
 本节自测：只在数据库 image 字段随便写一个图片地址，没有实际上传文件，顾客就一定能看到照片吗？答：不能，还必须保证对应文件真实存在且允许访问。
+
+### 9.9 代码重讲：从 photo.jpg 到图片访问地址
+
+使用用户上传 photo.jpg 的成功流程演示。以下整理版本复用了 originalFilename 变量，并省略日志、异常捕获和接口文档注解；不是新增或修改实际业务实现。
+
+```java
+@PostMapping("/upload")
+public Result<String> upload(MultipartFile file) {
+    String originalFilename = file.getOriginalFilename();
+    String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
+    String objectName = UUID.randomUUID().toString() + extension;
+    String filePath = aliOssUtil.upload(file.getBytes(), objectName);
+    return Result.success(filePath);
+}
+```
+
+这段是为了说明主干流程的节选，真实方法保留了异常处理。MultipartFile.getBytes() 涉及异常处理，不应把节选当成无需补充即可单独编译的完整方法。
+
+**步骤1：接收上传文件。** `MultipartFile` 是类型，`file` 是变量名，代表本次请求上传的文件。类上的 `/admin/common` 与方法上的 `/upload` 组合成后端接口路径。`Result<String>` 表示成功响应的 data 是字符串。
+
+**步骤2：读取原文件名。** `file.getOriginalFilename()` 得到字符串 photo.jpg，并没有读取整张图片内容，也没有上传到 OSS。
+
+**步骤3：取得后缀。** 将原来的长表达式拆开看：
+
+```java
+int dotIndex = originalFilename.lastIndexOf(".");
+String extension = originalFilename.substring(dotIndex);
+```
+
+对 photo.jpg，最后一个点的下标是5。substring(5) 从这个点开始取到结尾，结果是 .jpg。这里操作的是文件名字符串，不是裁剪图片。
+
+**步骤4：生成存储名称。** `UUID.randomUUID()` 生成 UUID，`toString()` 转成字符串，再与 .jpg 拼接。存储时使用新名字，降低同名碰撞风险。UUID 的格式不需要背诵，扩展名也不能代替真实类型校验。
+
+**步骤5：取得内容并调用上传工具。**
+
+```java
+byte[] bytes = file.getBytes();
+String filePath = aliOssUtil.upload(bytes, objectName);
+```
+
+这两行等价于 Controller 中的一行调用。第一个参数提供图片内容，第二个参数说明在 OSS 中用什么名字保存。byte[] 是字节数组，可以先理解为文件内容在 Java 中的一种表示。
+
+这里是 Controller 直接调用项目的 AliOssUtil 工具类；没有经过员工分页中那种 Service → Mapper → MySQL 流程。保存文件与保存菜品记录是不同的操作。
+
+工具类中创建 OSS 客户端：
+
+```java
+OSS ossClient = new OSSClientBuilder()
+        .build(endpoint, accessKeyId, accessKeySecret);
+```
+
+endpoint 是要连接的 OSS 服务地址；accessKeyId 与 accessKeySecret 是程序使用的访问凭证。客户端对象是程序调用 OSS 的工具，不是图片文件。
+
+真正执行存储请求：
+
+```java
+ossClient.putObject(
+    bucketName,
+    objectName,
+    new ByteArrayInputStream(bytes)
+);
+```
+
+三个参数分别回答“放进哪个容器、叫什么名字、文件内容是什么”。ByteArrayInputStream 把字节数组包装成可供读取的输入流，便于 SDK 读取文件内容，不是重新生成一张图片。
+
+工具类最后关闭客户端以释放资源；shutdown 不表示删除已上传文件。
+
+**步骤6：构造地址并返回给前端。** 当前工具使用 StringBuilder 把协议、Bucket、endpoint 和 objectName 拼成访问地址。可读成 `https://<bucketName>.<endpoint>/<objectName>` 的示意结构。
+
+```java
+return Result.success(filePath);
+```
+
+filePath 在这里保存网络访问地址，不是电脑本地文件路径。前端从 result.data 取得字符串，可用于图片显示以及后续保存菜品时提交 image 字段。
+
+整个变量变化：
+
+```text
+file：请求上传的文件
+  → originalFilename：photo.jpg
+  → extension：.jpg
+  → objectName：UUID字符串.jpg
+  → file.getBytes()：图片内容
+  → filePath：访问地址
+  → Result.data：返回给前端的访问地址
+```
+
+文件上传的成功路径不涉及往菜品表插入记录。代码中原来的 try/catch 用于异常处理，但 AliOssUtil 吞掉部分 OSS 异常后仍返回地址的问题仍存在，详见 9.6；本节没有修复或实测上传。
+
+小练习：`file.getOriginalFilename()` 与 `file.getBytes()` 的区别是什么？前者取得名字字符串，后者取得实际文件内容。仅发送文件名不足以保存图片。
 
 ## 10. 用 AI 开发时，自己负责什么
 
