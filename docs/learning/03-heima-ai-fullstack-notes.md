@@ -1,6 +1,6 @@
 # 苍穹外卖：按黑马顺序学习 AI 辅助全栈开发
 
-整理日期：2026-10-18。
+首次整理：2026-10-18；最近更新：2026-10-19。
 
 这份笔记整理本次聊天已经讲过的内容，重点保留容易混淆的概念。示例中的员工、分类编号和记录数量是教学数据，不代表当前数据库中的实际内容。
 
@@ -18,10 +18,11 @@
 | 6 | 编辑员工：查询、回显、提交修改 |
 | 7 | 分类、套餐、表关联和删除检查 |
 | 8 | 公共字段自动填充、BaseContext、AOP |
-| 9 | 使用 AI 开发时的验收方法 |
-| 10 | 自测题与答案 |
+| 9 | 图片上传：文件、OSS、图片地址与菜品保存 |
+| 10 | 使用 AI 开发时的验收方法 |
+| 11 | 自测题与答案 |
 
-当前讲解到 Day 3 的公共字段自动填充：已用“管理员1修改员工8”的代码推演串联流程，补充反射的“找到方法 → 调用方法”和对象赋值与数据库更新的区别。这里只做代码讲解，没有实际修改员工数据；反射源码和完整异常处理不作为当前重点。下一阶段可进入文件上传、菜品新增等业务。
+当前讲解到 Day 3 的图片上传：已区分图片文件、OSS 存储、访问地址，以及上传图片与保存菜品两次操作。自动填充的反射用途和执行链已讲解；下一阶段继续菜品新增与口味数据。本次仅阅读代码并整理笔记，没有实际上传文件或修改业务数据，也未验证当前 OSS 配置可用。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -688,9 +689,112 @@ Service 组织业务数据
 - 执行 `invoke` 后，数据库就更新了吗？答：没有，只修改了 Java 对象，还需执行更新 SQL。
 - 管理员1修改员工8，`WHERE id` 和 `update_user` 分别是什么？答：8 和1。
 
-## 9. 用 AI 开发时，自己负责什么
+## 9. 图片上传：文件和地址分开保存
 
-### 9.1 描述一个可验收的需求
+### 9.1 从新增菜品页面理解
+
+商家新增“宫保鸡丁”时填写菜名、分类、价格，并选择一张图片。这个项目的常见流程有两次不同的业务操作：
+
+```text
+选择图片 → 上传图片文件 → 得到访问地址 → 前端保存地址并展示图片
+点击保存菜品 → 提交菜名、价格、分类ID、图片地址等 → 数据库保存菜品
+```
+
+两次操作不等于整个页面只有两次网络请求，分类查询、图片加载等也可能发请求。选择文件本身不等于已经上传，前端需要发起上传操作。
+
+### 9.2 图片存在哪里
+
+| 内容 | 当前方案的存放位置 |
+| --- | --- |
+| JPEG、PNG 等图片文件 | 阿里云 OSS 对象存储 |
+| 菜品名称、价格、所属分类等 | MySQL 菜品表 |
+| 图片访问地址字符串 | 菜品表的 image 字段 |
+
+OSS 可以先理解成在线文件仓库，Bucket 是其中一个存储容器。本项目通常不把图片文件内容直接写进 MySQL，也不是所有项目都必须使用 OSS；其他项目可能使用本地文件目录或其他存储服务。
+
+数据库中的图片地址帮助浏览器找到文件；地址字符串本身不是图片内容。能否访问还取决于文件是否存在、访问权限等。
+
+### 9.3 后端如何接收文件
+
+项目后端接口：`POST /admin/common/upload`，对应 CommonController：
+
+```java
+@PostMapping("/upload")
+public Result<String> upload(MultipartFile file) {
+    // 生成文件名、上传并返回地址
+}
+```
+
+普通员工编辑提交 JSON 字段；这里提交文件，通常使用 `multipart/form-data`，字段名为 `file`。MultipartFile 是 Spring 提供的接收上传文件的类型。
+
+前端教学示例：
+
+```js
+const formData = new FormData();
+formData.append("file", selectedFile);
+```
+
+selectedFile 表示用户已经选择的 File 对象。FormData 可以理解为能装文件和普通字段的表单数据。以上两行只准备数据，还未发送请求。通过浏览器 fetch 发送 FormData 时，让浏览器生成包含 boundary 的 Content-Type，不要把它写成 application/json；受保护接口仍需携带登录凭证。
+
+### 9.4 文件内容、原文件名和新文件名
+
+Controller 中主要步骤：
+
+```java
+String originalFilename = file.getOriginalFilename();
+// 实际代码从原文件名最后一个点开始截取扩展名
+String extension = originalFilename.substring(originalFilename.lastIndexOf("."));
+String objectName = UUID.randomUUID().toString() + extension;
+String filePath = aliOssUtil.upload(file.getBytes(), objectName);
+return Result.success(filePath);
+```
+
+这是对实际代码的整理，省略日志和异常捕获，并复用了原代码已经取得的 originalFilename 变量。
+
+| 名称 | 作用 |
+| --- | --- |
+| originalFilename | 用户上传的原始文件名，例如 photo.jpg |
+| extension | 后缀，例如 .jpg |
+| objectName | 上传后使用的对象名，例如 UUID 加 .jpg |
+| file.getBytes() | 取得真正的文件内容 |
+| filePath | 工具类返回的图片访问地址 |
+
+UUID 用于降低同名碰撞风险，避免不同用户都上传 photo.jpg 时使用同一个存储名称。它不是把图片内容改掉，也不是文件类型验证。当前取后缀写法没有完整处理文件名为空或没有点的情况，实际功能需要相应验证。
+
+### 9.5 OSS 上传和返回结果
+
+AliOssUtil 中真正发起存储的调用：
+
+```java
+ossClient.putObject(bucketName, objectName, new ByteArrayInputStream(bytes));
+```
+
+可以读成：把这份文件内容，以 objectName 为名称，放进指定 Bucket。
+
+在成功路径中，工具类构造地址，Controller 返回 `Result.success(filePath)`。因此这次响应中的 data 是地址字符串，不是分页对象或员工对象。
+
+前端使用这个字符串给菜品表单的 image 赋值，随后通过图片元素加载地址以展示预览。例如 Vue 模板 `<img :src="form.image">`；这里只是教学示例，不代表已有管理端组件采用同样变量名。
+
+点击保存菜品时，提交的 JSON 携带 image 地址。DishDTO 中 image 的类型是 String；菜品 Mapper 的插入 SQL 将 image 写入数据库。只上传图片但取消新增，菜品记录不会因为上传自动创建，图片可能已经留在 OSS 中。
+
+### 9.6 当前代码需要区分的成功与失败
+
+阅读发现：AliOssUtil 捕获 OSSException、ClientException 后仍继续构造并返回地址，没有把这两类失败继续抛给 Controller。因此某些上传失败也可能得到包含地址的成功响应。
+
+这是代码阅读发现，没有实际发起失败实验，本节也没有修改实现。不能把“接口返回了地址”直接当成“文件一定上传成功”。正常设计应在存储失败时向调用方报告失败，并验证上传的文件确实可访问。
+
+验收图片上传时，检查：有效图片上传后可正常显示；失败时不显示成功；文件大小与实际类型有合理校验；新建菜品保存后重新查询仍能取得图片地址。文件名后缀和前端 accept 限制不能替代后端文件验证。
+
+### 9.7 小练习
+
+1. 图片文件和 image 字段有什么区别？文件是实际图片内容；image 在当前项目中保存访问地址字符串。
+2. 拿到图片 URL 后，菜品一定创建了吗？没有，仍需提交保存菜品请求。
+3. 两个人都上传 photo.jpg，为什么重新生成文件名？降低对象名碰撞和意外覆盖的风险。
+4. 地址字符串返回成功，但图片打不开，要检查哪里？请求结果、OSS 上传是否成功、对象是否存在、访问地址与权限，不能只看字符串。
+
+## 10. 用 AI 开发时，自己负责什么
+
+### 10.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -704,7 +808,7 @@ Service 组织业务数据
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 9.2 验收比“代码能运行”多一步
+### 10.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -717,7 +821,7 @@ Service 组织业务数据
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 10. 自测与答案
+## 11. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -780,6 +884,9 @@ Service 组织业务数据
 - [BaseContext](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/context/BaseContext.java)
 - [管理端登录校验](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/interceptor/JwtTokenAdminInterceptor.java)
 - [全局异常处理](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/handler/GlobalExceptionHandler.java)
+- [文件上传接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/admin/CommonController.java)
+- [OSS 上传工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/AliOssUtil.java)
+- [菜品提交参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/DishDTO.java)
 
 ### 已有学习资料
 
