@@ -19,10 +19,11 @@
 | 7 | 分类、套餐、表关联和删除检查 |
 | 8 | 公共字段自动填充、BaseContext、AOP |
 | 9 | 图片上传：文件、OSS、图片地址与菜品保存 |
-| 10 | 使用 AI 开发时的验收方法 |
-| 11 | 自测题与答案 |
+| 10 | 新增菜品：菜品与口味分表保存 |
+| 11 | 使用 AI 开发时的验收方法 |
+| 12 | 自测题与答案 |
 
-当前进度：2026-10-19，用户在 9.10 简化讲解后确认已理解图片上传的核心流程：取得图片内容 → 调用上传工具保存到 OSS → 接收并返回图片地址。下一节继续菜品新增与口味数据。自动填充的反射用途和执行链已讲解。这里记录的是概念理解反馈，不代表已完成独立实现或实操验证；尚未实际上传文件，也未验证当前 OSS 配置可用。
+当前进度：2026-10-19，图片上传核心流程已获用户理解反馈。现开始新增菜品第一小节：菜品与口味的表结构、dish_id 关联、先保存菜品取得ID再保存口味。下一小节可展开主键回填和批量插入，再讲事务。本次仅讲解并整理笔记，没有实际上传文件或新增菜品；讲解不等于独立实操已完成。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -947,9 +948,102 @@ return Result.success(url);
 
 学习反馈：用户在这版解释后回复“听懂了”。核心是区分传入的图片内容与返回的地址，按“先执行等号右边，再把返回值赋给左边变量”阅读方法调用。下一节继续菜品保存，不要求先背诵完整上传工具代码。
 
-## 10. 用 AI 开发时，自己负责什么
+## 10. 新增菜品：菜品和口味分开保存
 
-### 10.1 描述一个可验收的需求
+### 10.1 本节只看表结构与保存顺序
+
+商家配置“宫保鸡丁”：所属分类热菜、价格28元、图片为已上传得到的地址，还可以配置辣度选项“不辣、微辣、中辣”，以及忌口选项“不要葱、不要蒜”。这里是在给商家配置可选项，不是记录某位顾客本次点单选了哪个口味。
+
+菜品表 dish 保存基本信息，菜品口味表 dish_flavor 保存这道菜的口味配置。一个菜品可以有多条口味配置，因此是一对多关系。
+
+菜品表示例：
+
+| id | name | category_id | price | image |
+| --- | --- | --- | --- | --- |
+| 100 | 宫保鸡丁 | 1 | 28 | 已上传图片的访问地址 |
+
+口味表示例：
+
+| id | dish_id | name | value |
+| --- | --- | --- | --- |
+| 501 | 100 | 辣度 | `["不辣","微辣","中辣"]` |
+| 502 | 100 | 忌口 | `["不要葱","不要蒜"]` |
+
+编号均为教学假设。dish_id=100 表示口味配置属于菜品100；口味记录自己的编号是501或502。菜品的 category_id=1 则指向分类，不能把 category_id 与 dish_id 混为一谈。
+
+当前 DishFlavor.value 的 Java 类型是 String，表中的选项以 JSON 数组形式的文本展示，不应误认为这个字段在 Java 中是 List。两行表示两个口味组，不是每个选项各插入一条记录。
+
+### 10.2 前端提交一份表单，后端分别写两张表
+
+DishDTO 同时接收菜品字段和口味列表：
+
+```java
+private String name;
+private Long categoryId;
+private BigDecimal price;
+private String image;
+private List<DishFlavor> flavors = new ArrayList<>();
+```
+
+flavors 可理解为装多个口味配置对象的列表。本例里有“辣度”和“忌口”两个对象。它不是图片，也不是菜品分类。
+
+新增菜品接口将 DTO 交给 `dishService.saveWithFlavor(dishDTO)`。一次新增菜品请求可以组织多次数据库操作，不是每张表必须分别让前端发请求。
+
+### 10.3 为什么先保存菜品
+
+按当前项目中由数据库生成新增菜品ID的流程，保存前不知道最终菜品ID，就无法给口味记录设置正确的 dish_id。
+
+```text
+提交菜品信息和口味配置
+  → 向 dish 表插入菜品
+  → 得到新菜品ID，假设为100
+  → 把每个口味对象的 dishId 设置为100
+  → 插入口味表
+```
+
+Service 中先执行：
+
+```java
+Dish dish = new Dish();
+BeanUtils.copyProperties(dishDTO, dish);
+dishMapper.insert(dish);
+Long dishId = dish.getId();
+```
+
+属性复制准备菜品基本信息；口味列表不会因此自动存入数据库。insert 执行新增，随后 getId 读取回填到 dish 对象里的ID，并不是再执行查询。
+
+Mapper XML 的配置是：
+
+```xml
+<insert id="insert" useGeneratedKeys="true" keyProperty="id">
+    <!-- 实际 INSERT SQL -->
+</insert>
+```
+
+它配合数据库生成的主键，将生成值写回传入对象的 id 属性。若没有相应主键生成与回填机制，不能仅凭 new Dish() 就认为已经有了数据库ID。详细原理留到下一小节。
+
+### 10.4 再给口味设置所属菜品并批量保存
+
+项目取得 `dishDTO.getFlavors()`，当列表不为 null 且非空时，给其中每个口味对象设置 dishId，再调用 `dishFlavorMapper.insertBatch(flavors)`。
+
+先用普通循环理解原项目的 forEach 写法：
+
+```java
+for (DishFlavor flavor : flavors) {
+    flavor.setDishId(dishId);
+}
+dishFlavorMapper.insertBatch(flavors);
+```
+
+这段只展示非空分支。循环中的 setDishId 只是修改 Java 对象；insertBatch 才触发口味表的插入。当前 XML 用 foreach 生成一条带多组 VALUES 的 INSERT，批量 SQL 细节下一小节展开。
+
+没有口味时只保存菜品，不需要强行插入口味记录。一次新增请求是否全部成功，涉及事务；项目 saveWithFlavor 上有 @Transactional，留到后续结合失败场景讲解，不把它理解为任何外部操作都会自动回滚。
+
+小练习：新菜品ID为200，它的“辣度”和“忌口”两条配置的 dish_id 应分别是多少？答案：都为200，表示同属于这道菜；各自的口味记录ID仍独立。
+
+## 11. 用 AI 开发时，自己负责什么
+
+### 11.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -963,7 +1057,7 @@ return Result.success(url);
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 10.2 验收比“代码能运行”多一步
+### 11.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -976,7 +1070,7 @@ return Result.success(url);
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 11. 自测与答案
+## 12. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -1042,6 +1136,10 @@ return Result.success(url);
 - [文件上传接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/admin/CommonController.java)
 - [OSS 上传工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/AliOssUtil.java)
 - [菜品提交参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/DishDTO.java)
+- [菜品保存业务](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/DishServiceImpl.java)
+- [菜品插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/DishMapper.xml)
+- [口味实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/DishFlavor.java)
+- [口味批量插入](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/DishFlavorMapper.xml)
 
 ### 已有学习资料
 
