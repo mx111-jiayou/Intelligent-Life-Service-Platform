@@ -27,7 +27,7 @@
 | 15 | 使用 AI 开发时的验收方法 |
 | 16 | 自测题与答案 |
 
-当前进度：2026-10-19，套餐新增已讲解，本节进入14.6的套餐起售、停售：区分目标套餐状态与菜品当前状态，起售前查询套餐中的菜品，发现停售菜品则拒绝，否则更新套餐状态。下一节可继续套餐编辑。这里仅阅读代码并讲解，没有实际修改商品状态，理解情况以后续反馈为准。
+当前进度：2026-10-19，套餐新增与起售检查已讲解。本节进入14.7编辑套餐：分别查套餐与明细进行回显，更新套餐基本资料、按 setmeal_id 清理旧关联、保存完整新关联列表；重点区分移除套餐中的菜与删除原菜品。下一节可讲套餐删除与管理功能复习，再进入Day 5。这里仅阅读代码并讲解，没有实际编辑数据。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1928,6 +1928,83 @@ setmealMapper.update(setmeal);
 注意当前方法的实际边界：仅当查询列表非空时检查其中菜品；不能据此断言已经校验空套餐、缺失菜品、非法status等全部情况。这个检查发生在起售请求处理时，也不等于系统已实现“之后任何菜品停售都会自动同步套餐”的持续约束。本节说明现有代码，没有修改实现。
 
 小练习：请求 status=0，套餐中含有停售菜品，本方法会因该菜品停售而拒绝吗？答案：正常情况下不会，这个菜品状态检查仅在请求起售时执行。套餐停售也不会把单卖的米饭一起停售。
+
+### 14.7 编辑套餐：换的是包含关系，不是删除原菜品
+
+教学场景：套餐20原价32元，包含宫保鸡丁100、米饭200、柠檬茶300各1份。编辑后价格35元，保留宫保鸡丁、把米饭改成2份、将饮品换为已经存在的酸梅汤400。
+
+```text
+原套餐20：32元，100×1、200×1、300×1
+新套餐20：35元，100×1、200×2、400×1
+```
+
+#### 先回显套餐基本信息和明细
+
+getByIdWithDish 执行：
+
+```java
+Setmeal setmeal = setmealMapper.getById(id);
+List<SetmealDish> setmealDishes = setmealDishMapper.getBySetmealId(id);
+
+SetmealVO setmealVO = new SetmealVO();
+BeanUtils.copyProperties(setmeal, setmealVO);
+setmealVO.setSetmealDishes(setmealDishes);
+return setmealVO;
+```
+
+第一次查询 setmeal 的套餐资料；第二次查询 `setmeal_dish WHERE setmeal_id=20` 的包含明细；Java 组装 VO 后一次返回。前端据此展示原价格、已选菜品、份数等字段。这与菜品回显时组合基本信息和口味列表的思路相同，但列表内容不同。
+
+#### 保存三步
+
+Service 的 update 方法带有 @Transactional。主要顺序为：
+
+```java
+// 1. 准备并更新套餐基本信息
+Setmeal setmeal = new Setmeal();
+BeanUtils.copyProperties(setmealDTO, setmeal);
+setmealMapper.update(setmeal);
+
+// 2. 删除这个套餐原来的包含关系
+Long setmealId = setmealDTO.getId();
+setmealDishMapper.deleteBySetmealId(setmealId);
+
+// 3. 为完整新明细设置同一个套餐ID，再插入
+List<SetmealDish> setmealDishes = setmealDTO.getSetmealDishes();
+setmealDishes.forEach(setmealDish -> {
+    setmealDish.setSetmealId(setmealId);
+});
+setmealDishMapper.insertBatch(setmealDishes);
+```
+
+本次 setmealId 直接读取原来的20，不是创建新套餐，也不是再次生成主键。
+
+第二步 SQL 是：
+
+```sql
+DELETE FROM setmeal_dish WHERE setmeal_id = 20;
+```
+
+它删除的是关联表中的旧组合记录，不是删除 setmeal 套餐表，也不是从 dish 菜品表删除宫保鸡丁、米饭、柠檬茶。其他套餐与这些菜品的关联也不会因为限定 setmeal_id=20 的清理而自动消失。
+
+第三步保存的新组合：
+
+| setmeal_id | dish_id | copies |
+| --- | --- | --- |
+| 20 | 100 | 1 |
+| 20 | 200 | 2 |
+| 20 | 400 | 1 |
+
+结果是套餐20不再包含柠檬茶，但柠檬茶300仍是已有菜品，可以单独卖，也可以继续被其他套餐使用。copies=2 描述这份套餐含2份米饭，不是把单卖米饭的某个属性统一改成2。
+
+#### 完整列表与事务
+
+当前采用全量替换关系，前端应提交完整最终列表。只发酸梅汤一条，当前保存逻辑不会自动保留宫保鸡丁和米饭的关联；需要保留的明细也应随表单提交。
+
+与前面菜品编辑不同，当前套餐更新代码直接对列表 forEach 并调用 insertBatch，没有同样的非空分支。不能照搬“空列表就成功清空”的结论，缺省、null、空套餐的允许规则与实现需单独核对。本节没有修改业务校验。
+
+在事务配置和异常规则正常生效时，更新套餐、删除旧关系、插入新关系共同提交；中途需要回滚的失败应撤销本次数据库修改。仅有页面显示失败，不能当作回滚已经验证。本节没有实际执行编辑或故障测试。
+
+小练习：将套餐20里的柠檬茶换成酸梅汤，是否需要删除 dish 表中的柠檬茶300？答案：不需要，移除的是套餐20与菜品300的包含关系。
 
 ## 15. 用 AI 开发时，自己负责什么
 
