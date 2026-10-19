@@ -29,7 +29,7 @@
 | 17 | 使用 AI 开发时的验收方法 |
 | 18 | 自测题与答案 |
 
-当前进度：2026-10-19，用户在code来源解释后回复“欧克懂了”，已记录其对临时code由微信提供、小程序取得并转交的理解反馈。下一节对照getOpenid代码，解释后端如何组织参数、调用微信接口并解析openid。openid与本地用户对应关系、token签发前核验目的已讲解；尚未实际微信登录联调。
+当前进度：2026-10-19，用户已确认理解code来源。本节展开16.4的getOpenid：Map准备微信请求参数，HttpClientUtil发送GET，返回JSON文本，再parseObject/getString提取openid。强调本项目接收的code与微信接口要求的js_code对应，以及appid不是用户ID。下一节可继续本地用户匹配与token代码或商品浏览。尚未实际微信登录联调，平台最新规则未在线核验。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2566,6 +2566,75 @@ return user;
 
 已有记录则直接使用原来的user.id，不会每次登录都新增用户。先查再插入是否有并发重复注册问题，还取决于数据库唯一约束等，本节仅说明当前代码主线。
 
+#### 本节展开：getOpenid逐句阅读
+
+实际代码：
+
+```java
+private String getOpenid(String code) {
+    Map<String, String> map = new HashMap<>();
+    map.put("appid", wxChatProperties.getAppid());
+    map.put("secret", wxChatProperties.getSecret());
+    map.put("js_code", code);
+    map.put("grant_type", "authorization_code");
+
+    String json = HttpClientUtil.doGet(WECHAT_LOGIN, map);
+    JSONObject jsonObject = JSON.parseObject(json);
+    String openid = jsonObject.getString("openid");
+    return openid;
+}
+```
+
+**参数code从哪里来。** 调用处是 `getOpenid(userLoginDTO.getCode())`，即从前端本次登录请求中取出code，交给这个方法。private表示这是当前类内部使用的方法，String表示返回值是文本，本次返回openid。
+
+**Map装的是请求参数，不是用户表。** `Map<String, String>` 的参数名与参数值均为字符串。四次put可以理解为准备一份交给微信的参数清单：
+
+| 参数名 | 值来自哪里 | 表达什么 |
+| --- | --- | --- |
+| appid | 后端小程序配置 | 哪个小程序，不是哪个顾客 |
+| secret | 后端小程序配置 | 这个应用使用的服务端凭证，不是用户密码 |
+| js_code | 传入方法的code | 本次临时登录凭证 |
+| grant_type | 固定文本authorization_code | 当前接口要求的交换方式标记 |
+
+这里只解释源码字段，不展示真实配置。appid与secret属于小程序应用的配置，code来自当前登录；不要混为用户填写的一套账号密码。
+
+本项目前端登录接口接收字段名code；后端请求微信时参数名为js_code。请求不同接口时，要按各自约定设置名字，不是所有环节都必须用同一个字符串。
+
+**发送HTTP请求。** WECHAT_LOGIN在源码中是微信登录接口地址 `https://api.weixin.qq.com/sns/jscode2session`。调用 `HttpClientUtil.doGet(WECHAT_LOGIN, map)` 将地址与参数交给项目工具，工具组织查询参数，发出GET请求，取得响应正文。
+
+这里Java后端扮演HTTP客户端，微信服务端接收请求。与平时前端调用本项目接口相比，请求发起方改变了；后端既能接收请求，也能主动访问其他服务。此步骤不是Mapper查询MySQL。
+
+```text
+小程序 → 本项目后端：POST /user/user/login，JSON中提交code
+本项目后端 → 微信服务端：GET登录接口，参数中提交js_code等
+微信服务端 → 本项目后端：返回响应正文
+```
+
+两个请求的方法与参数名可以不同，因为面向不同接口。不能把HttpClientUtil.doGet误认为重新调用小程序前端，或认为外层POST要求内部也必须POST。
+
+**把JSON文本转换成可取字段的对象。** 响应中只保留openid字段的教学示例：
+
+```json
+{"openid":"wx_A"}
+```
+
+它最初在Java中是String文本，变量名json。执行 `JSON.parseObject(json)` 后得到JSONObject，便于按字段名取值；再执行 `jsonObject.getString("openid")`，得到字符串wx_A，最后return交回wxLogin。
+
+这一步不是生成openid，也不是把code自己计算成openid；openid来自微信响应，代码只是解析并提取。JSONObject也不是本地User实体，后面仍要按openid查询或创建本地用户。
+
+**看到失败响应时。** 请求微信不保证每次都成功，不能只凭HTTP200就断言有openid。当前wxLogin会拒绝空openid；具体网络错误、平台错误码和工具异常处理仍需要更完整的实现与联调。本节只讲正常路径，没有修改工具或发起真实微信登录请求，也没有成功读取最新官方接口文档。
+
+```text
+传入code
+  → 准备Map参数
+  → 调用HTTP工具请求微信
+  → 接收JSON文本
+  → 解析对象并取openid字段
+  → 返回openid给登录业务
+```
+
+自测：代码中的getString("openid")是否在向微信申请一个新用户编号？答案：不是，它只从已经收到的响应对象中读取字段；向微信发请求的是前面的doGet。
+
 ### 16.5 Controller签发本系统token
 
 UserController先调用userService.wxLogin取得本地用户，然后把user.id放入JWT载荷，通过JwtUtil.createJWT生成本项目token，放进UserLoginVO返回。
@@ -2725,6 +2794,7 @@ UserController先调用userService.wxLogin取得本地用户，然后把user.id�
 - [用户登录接口与token生成](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/UserController.java)
 - [用户Mapper及openid查询](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/UserMapper.java)
 - [用户插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/UserMapper.xml)
+- [HTTP请求工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/HttpClientUtil.java)
 
 ### 已有学习资料
 
