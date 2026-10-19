@@ -24,10 +24,11 @@
 | 12 | 批量删除菜品：状态检查、套餐关联、口味清理与事务 |
 | 13 | 编辑菜品：回显口味、替换口味列表与事务边界 |
 | 14 | Day 4 套餐管理：套餐、菜品与关联表 |
-| 15 | 使用 AI 开发时的验收方法 |
-| 16 | 自测题与答案 |
+| 15 | Day 5 店铺营业状态与 Redis 入门 |
+| 16 | 使用 AI 开发时的验收方法 |
+| 17 | 自测题与答案 |
 
-当前进度：2026-10-19，本节讲解14.8套餐删除，并在14.9串联套餐新增、编辑、起售与删除的核心规则。下一阶段进入黑马 Day 5 店铺营业状态和 Redis。当前记录的是讲解覆盖范围，不代表用户已独立实现；没有实际修改或删除业务数据。
+当前进度：2026-10-19，进入黑马 Day 5 第一小节（第15节）：用店铺营业状态理解 Redis 是独立的数据存储服务、key/value、管理端写入与两端读取同一个状态，以及缺失时默认打烊。下一小节可以拆解 RedisTemplate 读写与 Redis 数据类型；缓存菜品在后续阶段讲。尚未运行 Redis 命令或修改真实店铺状态。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2072,9 +2073,95 @@ DELETE FROM setmeal_dish WHERE setmeal_id = 20;
 
 让 AI 实现或修改这些功能时，应明确“变的是主资料、关联关系还是商品状态”，并检查实际 SQL 操作了哪张表、WHERE 用哪个编号、事务是否覆盖完整业务。页面上一个按钮不能代替这些数据库和业务决策。
 
-## 15. 用 AI 开发时，自己负责什么
+## 15. Day 5：店铺营业状态与 Redis 入门
 
-### 15.1 描述一个可验收的需求
+### 15.1 Redis 先理解为另一个数据存储服务
+
+MySQL 存员工、分类、菜品、套餐等表。Redis 是另一个独立运行的数据存储服务，主要在内存中处理数据，常用于频繁读取的简单状态或缓存。它不是 Java 的普通变量，也不是一份 XML 配置文件。
+
+先不展开内存、持久化、各种数据类型的底层细节。本项目的营业状态可以用一个键值对表示，不需要先设计一张营业状态表。
+
+### 15.2 key 与 value
+
+可以把本例理解成按名称存取的一条数据：
+
+| key：这项数据的名字 | value：这项数据的值 |
+| --- | --- |
+| SHOP_STATUS | 1 |
+
+key 用于定位数据，value 是对应的内容。当前项目约定1为营业、0为打烊；Redis 本身不认识这两个数字的业务含义，是应用代码规定的。
+
+```text
+SHOP_STATUS → 1：营业中
+SHOP_STATUS → 0：打烊
+```
+
+以上是逻辑示意，不是让用户直接用 redis-cli 写字符串数字来替换项目序列化的 Integer。当前 RedisTemplate 配置显式使用字符串序列化 key，value 的实际编码还受其序列化器影响，不要求本节掌握。
+
+### 15.3 管理员设置状态
+
+后端接口：`PUT /admin/shop/1` 设置营业，`PUT /admin/shop/0` 设置打烊。Controller 中实际写入：
+
+```java
+redisTemplate.opsForValue().set(CacheConstant.SHOP_STATUS, status);
+```
+
+分开看：RedisTemplate 是 Java 访问 Redis 的工具；opsForValue() 取得操作 Redis 字符串类型值的入口；set(key, value) 写入键对应的值。本项目通过模板序列化保存 Java 的 Integer 对象，不要把这个对象类型与 Redis 底层类型混为一谈。
+
+CacheConstant.SHOP_STATUS 是项目常量，其字符串内容为 SHOP_STATUS。调用 set 设置同一个 key 的新值，会覆盖该键原来的值，不是为每次开关店新建一条历史记录。
+
+### 15.4 两端读取同一份状态
+
+管理端查询接口 `GET /admin/shop/status`，用户端查询接口 `GET /user/shop/status`。两边使用相同的 Redis key，而不是各在浏览器里单独保存状态。
+
+```java
+Integer status = (Integer) redisTemplate.opsForValue()
+        .get(CacheConstant.SHOP_STATUS);
+```
+
+get(key) 按名字读取对应值；当前代码将模板返回值转换成 Integer。读取不代表检查 MySQL 店铺表，本例的两个 Controller 都直接访问 Redis。
+
+```text
+管理员点击营业
+    → 后端把 SHOP_STATUS 写成1
+    → 顾客页面请求查询状态
+    → 后端从同一个 key 读取1
+    → 返回前端，页面显示营业中
+```
+
+这不代表商家修改后所有已打开页面都会自动收到通知，顾客页面需要再次查询或有相应刷新机制；此处没有用 WebSocket 实时推送。
+
+### 15.5 key 不存在时怎么办
+
+当前两个 Controller 都处理 null：
+
+```java
+if (status == null) {
+    status = StatusConstant.DISABLE;
+    redisTemplate.opsForValue().set(CacheConstant.SHOP_STATUS, status);
+}
+return Result.success(status);
+```
+
+即缺少这项值时，按打烊0处理，并写回 Redis。这是本项目的默认业务选择，不是 Redis 自动生成了0。null 表示没有读到这项数据，与明确保存的数字0不同。
+
+Redis key 不存在与 Redis 服务连接失败也不同：前者可以正常读出 null，后者可能抛出连接异常，不能把这段 null 判断解释为已经处理全部服务故障。
+
+### 15.6 为什么这里使用 Redis
+
+营业状态很小，管理端修改、用户端可能频繁读取，用键值存取很直接。也可以使用 MySQL 保存，这不是业务只能使用 Redis 的强制要求。
+
+本例是直接用 Redis 存状态，没有“Redis没有就从MySQL查店铺状态”的流程。后续菜品缓存会讲另一种流程：MySQL 保存业务记录，Redis 保存可复用的查询结果。不能把 Redis 所有使用场景都等同于缓存副本。
+
+Redis 可以配置持久化，不要简单记成重启必然清空；也不要因能持久化就认为它对任何数据都有与关系数据库完全相同的保障。当前先学会具体业务的数据存放位置与读写路径。
+
+当前项目只用一个固定SHOP_STATUS键代表全店状态；多店铺场景需按店铺区分键，是后续设计问题。方法没有在本节展示完整输入合法值校验，不能把任意整数自动视为合法状态。
+
+小练习：管理员写入 SHOP_STATUS=0，顾客查询同一个key得到什么？答案：0，页面按项目约定显示打烊。只修改前端文字、没有发请求写入 Redis，会改变服务端状态吗？不会。
+
+## 16. 用 AI 开发时，自己负责什么
+
+### 16.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -2088,7 +2175,7 @@ DELETE FROM setmeal_dish WHERE setmeal_id = 20;
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 15.2 验收比“代码能运行”多一步
+### 16.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -2101,7 +2188,7 @@ DELETE FROM setmeal_dish WHERE setmeal_id = 20;
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 16. 自测与答案
+## 17. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -2177,6 +2264,10 @@ DELETE FROM setmeal_dish WHERE setmeal_id = 20;
 - [套餐实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/Setmeal.java)
 - [套餐菜品关联实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/SetmealDish.java)
 - [套餐提交参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/SetmealDTO.java)
+- [管理端店铺状态](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/admin/ShopController.java)
+- [用户端店铺状态](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/ShopController.java)
+- [Redis 模板配置](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/config/RedisConfiguration.java)
+- [缓存键常量](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/constant/CacheConstant.java)
 
 ### 已有学习资料
 
