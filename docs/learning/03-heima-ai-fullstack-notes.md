@@ -20,10 +20,11 @@
 | 8 | 公共字段自动填充、BaseContext、AOP |
 | 9 | 图片上传：文件、OSS、图片地址与菜品保存 |
 | 10 | 新增菜品：菜品与口味分表保存 |
-| 11 | 使用 AI 开发时的验收方法 |
-| 12 | 自测题与答案 |
+| 11 | 菜品分页查询：LEFT JOIN、分类名称与 DishVO |
+| 12 | 使用 AI 开发时的验收方法 |
+| 13 | 自测题与答案 |
 
-当前进度：2026-10-19，新增菜品已讲到 10.5 的事务。针对用户标注“事务要生效、失败要正确报告”，补充 Spring 如何通过方法抛出的异常判断回滚，以及在方法内 catch 后忽略异常与在外层统一处理异常的区别。尚未实际测试回滚，后续根据理解情况再推进。
+当前进度：2026-10-19，新增菜品与事务已讲解，现进入菜品分页查询的联表部分（第11节）：根据 category_id 找分类名称，理解表别名、LEFT JOIN、ON 和结果列别名 categoryName，再接回 PageHelper 与 DishVO。这里仅阅读代码并讲解，尚未实际执行联表查询或事务回滚测试。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1377,9 +1378,99 @@ try {
 
 本节自测：新增宫保鸡丁时，菜品 INSERT 完成，口味 INSERT 抛出未捕获的运行时异常。若两步处于同一正常生效的事务中，菜品应留下吗？答案：不应留下，此次菜品插入随事务回滚。之前上传到 OSS 的图片会自动消失吗？不会，它不属于本次数据库事务。
 
-## 11. 用 AI 开发时，自己负责什么
+## 11. 菜品分页查询：怎样显示分类名称
 
-### 11.1 描述一个可验收的需求
+### 11.1 页面需要的信息来自两张表
+
+页面希望显示“宫保鸡丁、热菜、28元”。菜品表只记录 category_id，分类名称来自 category 表。
+
+菜品表 dish，教学示例：
+
+| id | name | category_id | price |
+| --- | --- | --- | --- |
+| 100 | 宫保鸡丁 | 1 | 28 |
+| 101 | 柠檬茶 | 2 | 8 |
+
+分类表 category：
+
+| id | name |
+| --- | --- |
+| 1 | 热菜 |
+| 2 | 饮品 |
+
+通过 dish.category_id = category.id 匹配，查询结果中可以同时取得菜名和分类名。不是拿菜品自己的 id 与分类 id 相等来匹配。
+
+### 11.2 当前项目的联表 SQL
+
+DishMapper.xml 中的基础查询整理为：
+
+```sql
+SELECT d.*, c.name AS categoryName
+FROM dish d
+LEFT JOIN category c
+    ON d.category_id = c.id;
+```
+
+| 片段 | 含义 |
+| --- | --- |
+| FROM dish d | 查询菜品表，在这条 SQL 中用 d 作为表的简称 |
+| LEFT JOIN category c | 把分类表关联进来，用 c 作为简称 |
+| ON d.category_id = c.id | 规定按哪个字段关系匹配 |
+| d.* | 取菜品表的所有列 |
+| c.name AS categoryName | 取分类名称，在结果中称为 categoryName |
+
+d 和 c 仅是本次 SQL 的表别名，没有新建或改名数据库表。d.name 是菜名，c.name 是分类名，两个表都有 name 列，前缀用于说明来源。
+
+逐行理解关联：宫保鸡丁的 category_id=1，匹配到分类 id=1 的“热菜”；柠檬茶的 category_id=2，匹配到“饮品”。查询结果示意：
+
+| id | name | category_id | price | categoryName |
+| --- | --- | --- | --- | --- |
+| 100 | 宫保鸡丁 | 1 | 28 | 热菜 |
+| 101 | 柠檬茶 | 2 | 8 | 饮品 |
+
+这是结果的组合，不会向 dish 表新增 categoryName 列，也不会把分类名称自动写进菜品表。
+
+### 11.3 LEFT JOIN 为什么叫左连接
+
+在这条查询中，左侧是 FROM 后的 dish，右侧是 JOIN 后的 category。对保留下来的菜品行，LEFT JOIN 尝试匹配分类；如果找不到，仍可保留菜品行，分类侧字段为 null。
+
+例如某道菜 category_id=99，但分类表没有99，这条查询仍可返回菜品，categoryName 为 null。这个例子仅解释 SQL 行为，不表示业务允许保存无效分类。当前查询的动态筛选针对 d 表；其他查询如果在 WHERE 中添加分类侧条件，保留结果还会受这些条件影响。
+
+### 11.4 为什么结果类型是 DishVO
+
+当前 XML 使用 `resultType="com.sky.vo.DishVO"`，DishVO 中有：
+
+```java
+private String name;         // 菜名
+private Long categoryId;     // 分类编号
+private String categoryName; // 分类名称
+```
+
+SQL 的 `AS categoryName` 使分类名称结果列与这个 Java 属性对应。VO 用于组织页面所需的数据，能够接收由多个表组合出的结果，不要求每个属性都是同一张表的列。
+
+DTO 与 VO 在本功能中对应：DishPageQueryDTO 接收查询要求（页码、每页条数、菜名、分类ID、状态）；DishVO 表示查出的单条菜品展示信息。
+
+DishVO 虽然还定义了 flavors 属性，但本次分页 SQL 没有查询口味表；声明字段本身不会自动把口味查出来。
+
+### 11.5 接回已经学过的分页
+
+实际 Service 代码：
+
+```java
+PageHelper.startPage(dishPageQueryDTO.getPage(), dishPageQueryDTO.getPageSize());
+Page<DishVO> page = dishMapper.pageQuery(dishPageQueryDTO);
+return new PageResult(page.getTotal(), page.getResult());
+```
+
+联表负责“每行包含哪些信息”，筛选负责“哪些菜品符合条件”，分页负责“返回其中哪一页”。项目的 XML 还根据菜名、分类ID、状态追加条件，并按 d.update_time 倒序排列。
+
+关系链：dish.category_id → category.id → category.name → 查询结果 categoryName → DishVO.categoryName → 前端展示分类名。
+
+小练习：dish.id=100、dish.category_id=2，分类表 id=2 的名称为“饮品”，查询得到的 categoryName 是什么？答案：饮品。匹配依据是 category_id=2，不是菜品编号100。
+
+## 12. 用 AI 开发时，自己负责什么
+
+### 12.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -1393,7 +1484,7 @@ try {
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 11.2 验收比“代码能运行”多一步
+### 12.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -1406,7 +1497,7 @@ try {
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 12. 自测与答案
+## 13. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -1476,6 +1567,8 @@ try {
 - [菜品插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/DishMapper.xml)
 - [口味实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/DishFlavor.java)
 - [口味批量插入](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/DishFlavorMapper.xml)
+- [菜品展示对象 DishVO](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/vo/DishVO.java)
+- [菜品分页参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/DishPageQueryDTO.java)
 
 ### 已有学习资料
 
