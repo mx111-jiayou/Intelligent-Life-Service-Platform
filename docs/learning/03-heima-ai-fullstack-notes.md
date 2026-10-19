@@ -28,7 +28,7 @@
 | 16 | 使用 AI 开发时的验收方法 |
 | 17 | 自测题与答案 |
 
-当前进度：2026-10-19，Day 5已讲店铺状态键值读写；本节补充15.7、15.8，区分 Redis服务、Java中的RedisTemplate工具、SHOP_STATUS键，并理解链式调用、Spring创建与注入模板、类型转换及连接失败的定位。下一小节可继续Redis数据类型或过期时间，缓存菜品按后续课程展开。尚未运行Redis命令或修改真实状态。
+当前进度：2026-10-19，Day 5已讲店铺状态和RedisTemplate；本节进入15.9～15.11，认识String、Hash、List、Set、Sorted Set五种常见Redis值类型，结合店铺状态与项目聊天记录区分整体取值、按序追加，并区分Java类型与Redis类型。下一小节可讲过期时间。尚未运行Redis命令或修改真实数据。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2240,6 +2240,68 @@ Integer status = (Integer) redisTemplate.opsForValue()
 连接失败不是“key不存在”。Controller的null判断不能自动修复连接错误。本节只解释代码，没有启动Redis或执行测试。
 
 小练习：只写@Autowired RedisTemplate而不调用get，是否已经读取营业状态？答案：没有，取得的是操作工具。只调用opsForValue()是否已写入值？也没有，具体写入要执行set。
+
+### 15.9 Redis数据类型：先按需求选结构
+
+Redis的值可以采用不同结构，下面是本阶段先学的五种常见类型，不是说Redis所有版本总共只有五种类型。概念参考[Redis官方数据类型说明](https://redis.io/docs/latest/develop/data-types/)。
+
+| 类型 | 可以怎样理解 | 需求示例 | 模板入口 |
+| --- | --- | --- | --- |
+| String | 一个键对应一份字节数据，可整体存取 | 营业状态、完整JSON内容 | opsForValue() |
+| Hash | 一个键下分多个字段存值 | 用户资料中的name、phone | opsForHash() |
+| List | 按位置/插入顺序组织多条值，可重复 | 按顺序追加的聊天记录 | opsForList() |
+| Set | 不重复、不保证顺序的一组成员 | 某菜品的收藏用户ID集合 | opsForSet() |
+| Sorted Set，常叫ZSet | 成员不重复，每个成员关联分数，可按分数排序 | 按销量排序的菜品排行 | opsForZSet() |
+
+Hash、收藏集合、排行榜是概念例子，不代表本项目已实现相应功能。已查看的业务代码中，店铺状态用opsForValue，聊天记录追加用opsForList。
+
+### 15.10 String与List结合项目理解
+
+店铺状态是一个简单值：
+
+```text
+SHOP_STATUS → 1
+```
+
+因此用opsForValue().set/get即可。Redis String是一份字节序列，不等于“Java端只能传String对象”。当前项目把Integer状态序列化后放进去，所以写入1并不意味着使用了一个名为Integer的Redis原生类型。
+
+聊天记录包含多条、顺序有意义，可以用Redis List：
+
+```text
+某会话的key → [用户：你好, 助手：您好, 用户：怎么下单]
+```
+
+每项是一个消息内容，列表可以追加。两条内容相同的消息仍可以出现两次，不会自动去重。
+
+AiChatServiceImpl的实际追加代码：
+
+```java
+stringRedisTemplate.opsForList()
+        .rightPush(key, JSON.toJSONString(chatMessage));
+```
+
+先把本条ChatMessage对象转换成JSON文本，再追加到这个key的List末尾。它不是每次set覆盖整份记录。key由用户ID和sessionId等组成，指向一段会话，而不是所有用户共用一份聊天记录。
+
+当前代码随后trim保留最近MEMORY_LIMIT条，并为key设置2小时过期时间；消息同时写入MySQL。本节只用追加动作理解类型，不声称这已经是完整大模型记忆功能，过期细节留到下一节。
+
+对比：set同一个String键会更新整份值；rightPush向List末尾增加一项，不会因追加自动覆盖前面所有项。
+
+### 15.11 别把Java类型当成Redis类型
+
+Java的List对象可以先序列化成一份内容，再通过opsForValue保存为Redis String；也可以逐项用opsForList保存为Redis List。选择哪一种取决于是否需要整体读写、逐项追加、截取等操作。
+
+```text
+Java中有List变量 ≠ Redis中必然是List类型
+Redis中存JSON文本 ≠ Redis原生类型必然是Hash或List
+```
+
+判断Redis原生类型应看使用的操作方式、序列化策略与实际存储，而不能只看Java变量名。RedisTemplate的泛型也不能直接替代Redis原生类型的选择。
+
+同一个现有key的类型与操作要匹配。不能因为某key已用String保存，就随意改用List追加；对不兼容类型执行操作会出错。这里只是解释类型规则，没有执行任何转换或删除。
+
+给AI安排Redis任务时，先说明操作需要：只保存一个状态、经常单独修改某字段、保持消息顺序、去重，还是按分数排行，再决定类型，而不是只说“加Redis”。
+
+小练习：需要按顺序保留两次相同的“你好”消息，应选List还是Set？答案：List；Set会去重，也不按加入顺序排列。营业状态只需一个值，当前项目使用String类型的get/set。
 
 ## 16. 用 AI 开发时，自己负责什么
 
