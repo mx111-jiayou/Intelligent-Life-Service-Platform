@@ -4,6 +4,8 @@
 
 学习时先回答三个问题：这是什么、解决什么问题、在项目哪里用到。
 
+后续知识点见[微信登录、前端请求与 Spring 缓存笔记](05-wechat-frontend-cache.md)：接口文档分组、HttpClient、JSONObject、小程序配置、AJAX、npm 命令、代理和嵌套路由。
+
 ## 1. 先把一次请求串起来
 
 以使用 Nginx 转发的后端请求为例：
