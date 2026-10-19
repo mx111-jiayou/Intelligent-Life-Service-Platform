@@ -29,7 +29,7 @@
 | 17 | 使用 AI 开发时的验收方法 |
 | 18 | 自测题与答案 |
 
-当前进度：2026-10-19，getOpenid请求和解析流程已讲解。用户标注“准备微信接口需要的四个参数”，本次继续在16.4解释各参数分别回答什么、值从哪里来，重点是前端只提交code，其他参数由后端准备。尚未实际微信登录联调，平台最新规则未在线核验。
+当前进度：2026-10-19，微信交换参数已讲解，本节展开16.5的本地用户匹配与token生成：openid查用户，首次创建并回填本地ID，Service返回User给Controller，Controller用用户ID、签名密钥和有效时长生成JWT并组装VO。下一节可解释后续请求如何校验token并识别当前用户，再继续商品浏览。没有实际进行登录或签发真实凭证。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2668,6 +2668,86 @@ UserController先调用userService.wxLogin取得本地用户，然后把user.id�
 
 不要把两层凭证混在一起：微信登录交换发生在前；后续业务身份校验使用项目自己的token。当前返回的VO含id、openid、token，不表示自动取得手机号或全部用户资料。
 
+#### 本节展开：本地用户与token的代码如何接起来
+
+假设getOpenid成功返回wx_A。Service中：
+
+```java
+User user = userMapper.getByOpenid(openid);
+if (user == null) {
+    user = User.builder()
+            .openid(openid)
+            .createTime(LocalDateTime.now())
+            .build();
+    userMapper.insert(user);
+}
+return user;
+```
+
+getByOpenid查询本项目MySQL用户表。已有用户则直接取得，例如id=7、openid=wx_A；没有用户才创建记录，生成的ID通过Mapper配置回填。两条分支最后都返回一个本地User对象。
+
+这句return返回给调用它的Controller，不是立即把全部User实体响应给小程序。Controller实际调用：
+
+```java
+User user = userService.wxLogin(userLoginDTO);
+```
+
+它取得Service的返回值，下一步已经可以使用user.getId()。不需要再让微信生成本项目数据库ID。
+
+Controller准备JWT中携带的信息：
+
+```java
+Map<String, Object> claims = new HashMap<>();
+claims.put(JwtClaimsConstant.USER_ID, user.getId());
+```
+
+claims可理解为本次token的内容清单，此处放入已确认的本地用户ID。与调用微信的参数Map不同，它不是拿去换openid的四个参数，也不包含小程序AppSecret。
+
+随后调用：
+
+```java
+String token = JwtUtil.createJWT(
+        jwtProperties.getUserSecretKey(),
+        jwtProperties.getUserTtl(),
+        claims
+);
+```
+
+| 参数 | 实际职责 |
+| --- | --- |
+| userSecretKey | 本项目用户JWT的签名密钥，与微信应用secret不是同一配置用途 |
+| userTtl | 本项目token的有效时长；工具参数单位为毫秒 |
+| claims | token携带的信息，本例包括用户ID7 |
+
+JwtUtil实现将声明写入、按当前时间加有效时长设置到期时间，并用HS256签名后输出字符串。这里是签名与有效期控制，不能因原代码注释写“加密/解密”就认为JWT载荷是保密加密内容。本节不要求背算法或token编码格式。
+
+最后组装UserLoginVO：
+
+```java
+UserLoginVO userLoginVO = UserLoginVO.builder()
+        .id(user.getId())
+        .openid(user.getOpenid())
+        .token(token)
+        .build();
+return Result.success(userLoginVO);
+```
+
+响应data包含本地id、openid、本系统token。构造VO是在Java中组织响应，不会因此新增用户记录或再次调用微信。
+
+后续业务请求携带这个token，由本项目后端校验后识别用户；并非客户端随便改响应中的id，就可以改变已签名token代表的身份。具体订单是否属于该用户仍是业务权限检查，token不是对任意订单的通行证。
+
+```text
+openid=wx_A
+  → 本地User对象id=7
+  → claims写入用户ID7
+  → JwtUtil用签名密钥和有效期生成token
+  → VO将token返回小程序
+```
+
+本节仅按源码解释，没有生成或输出真实token、读取真实密钥，也没有完成微信登录测试。
+
+自测：Controller拿到user.id=7后，还要向微信申请“本项目用户7”的token吗？答：不需要，本项目通过JwtUtil自行签发；微信提供的是前面的登录核验结果。
+
 #### 追问：为什么取得token需要这么多步骤
 
 生成token本身不复杂，关键是签发前要确认“发给谁、为什么相信他就是这个用户”。生成一个能通过签名校验的token，不会自动证明持有人最初的登录身份核验正确。
@@ -2816,6 +2896,7 @@ UserController先调用userService.wxLogin取得本地用户，然后把user.id�
 - [用户Mapper及openid查询](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/UserMapper.java)
 - [用户插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/UserMapper.xml)
 - [HTTP请求工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/HttpClientUtil.java)
+- [JWT签发与校验工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/JwtUtil.java)
 
 ### 已有学习资料
 
