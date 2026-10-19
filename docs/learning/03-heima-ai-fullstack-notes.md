@@ -23,7 +23,7 @@
 | 11 | 使用 AI 开发时的验收方法 |
 | 12 | 自测题与答案 |
 
-当前进度：2026-10-19，图片上传核心流程已获用户理解反馈。新增菜品已解释分表、主键回填；针对“数据库会自动生成ID吗”，10.3 补充 PRIMARY KEY 与 AUTO_INCREMENT 的区别：生成需要表结构支持，不是字段叫id就自动生效。下一节可继续口味关联、批量插入和事务。本次未连接数据库验证 dish 表结构，也没有实际新增菜品。
+当前进度：2026-10-19，图片上传核心流程已获用户理解反馈。新增菜品已解释分表、主键回填与数据库自增；本节展开 10.4 的口味列表、Java 循环设置 dishId，以及 XML foreach 生成多行 INSERT。下一节可用“菜品成功、口味失败”的场景讲事务。本次没有实际新增菜品或验证数据库运行结果。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1178,11 +1178,91 @@ for (DishFlavor flavor : flavors) {
 dishFlavorMapper.insertBatch(flavors);
 ```
 
-这段只展示非空分支。循环中的 setDishId 只是修改 Java 对象；insertBatch 才触发口味表的插入。当前 XML 用 foreach 生成一条带多组 VALUES 的 INSERT，批量 SQL 细节下一小节展开。
+这段只展示非空分支。循环中的 setDishId 只是修改 Java 对象；insertBatch 才触发口味表的插入。当前 XML 用 foreach 生成一条带多组 VALUES 的 INSERT，下面进一步展开。
 
 没有口味时只保存菜品，不需要强行插入口味记录。一次新增请求是否全部成功，涉及事务；项目 saveWithFlavor 上有 @Transactional，留到后续结合失败场景讲解，不把它理解为任何外部操作都会自动回滚。
 
 小练习：新菜品ID为200，它的“辣度”和“忌口”两条配置的 dish_id 应分别是多少？答案：都为200，表示同属于这道菜；各自的口味记录ID仍独立。
+
+#### 本节展开：Java 循环与 XML 循环各做什么
+
+教学前提：宫保鸡丁已经插入，主键回填得到 dishId=100。前端提供两条口味配置：辣度与忌口；一个口味组对应一个 DishFlavor 对象。
+
+```java
+List<DishFlavor> flavors = dishDTO.getFlavors();
+```
+
+这句读取请求 DTO 中的口味列表，不是在数据库里查询口味。此时新增口味的所属菜品ID尚待后端设置：
+
+```text
+flavors
+├─ 辣度：dishId待设置，value为不辣、微辣、中辣的选项文本
+└─ 忌口：dishId待设置，value为不要葱、不要蒜的选项文本
+```
+
+项目判断：
+
+```java
+if (flavors != null && flavors.size() > 0) {
+    // 有口味配置时才处理
+}
+```
+
+flavors != null 检查列表对象存在，size() > 0 检查里面有记录。&& 表示两个条件都满足；第一个条件不成立时不再执行后面的 size()，避免对 null 调用方法。
+
+项目实际赋值代码：
+
+```java
+flavors.forEach(dishFlavor -> {
+    dishFlavor.setDishId(dishId);
+});
+```
+
+forEach 对列表中的每个对象执行括号里的操作。dishFlavor 是本轮拿到的对象的变量名，箭头右边是对它做的操作；它不是新增了一份口味对象。
+
+当 dishId=100 时，相当于先给“辣度”对象设置100，再给“忌口”对象设置100。这两次 setter 都只修改内存对象，并没有执行两次数据库保存。
+
+循环结束后执行：
+
+```java
+dishFlavorMapper.insertBatch(flavors);
+```
+
+insertBatch 是项目定义的方法名，真正执行什么由 XML 决定。当前映射是：
+
+```xml
+<insert id="insertBatch">
+    insert into dish_flavor (dish_id, name, value)
+    values
+    <foreach collection="flavors" item="df" separator=",">
+        (#{df.dishId}, #{df.name}, #{df.value})
+    </foreach>
+</insert>
+```
+
+| 写法 | 含义 |
+| --- | --- |
+| collection="flavors" | 遍历传入的口味列表 |
+| item="df" | 给当前遍历到的口味对象起一个临时名字 |
+| #{df.dishId} | 读取当前口味的所属菜品ID并绑定参数 |
+| #{df.name} | 读取当前口味组名称 |
+| #{df.value} | 读取当前口味组选项文本 |
+| separator="," | 多组括号之间用逗号分隔 |
+
+MyBatis 将两条配置组织为带两组 VALUES 的一条 SQL。下面使用具体值说明效果，实际执行使用参数绑定：
+
+```sql
+INSERT INTO dish_flavor (dish_id, name, value)
+VALUES
+    (100, '辣度', '["不辣","微辣","中辣"]'),
+    (100, '忌口', '["不要葱","不要蒜"]');
+```
+
+对应插入两条记录。数据库执行的是 SQL，不执行 XML 标签。当前做法是单条 INSERT 插入多行，不要把所有叫 insertBatch 的方法都推断为同样实现。
+
+区别速记：Java forEach 给每个对象补上所属菜品ID；XML foreach 用这些对象的值组织 SQL 的多组数据；MySQL 最后执行插入。虽然两个地方都在循环，但职责不同。
+
+本节自测：有3个口味组时，Java setter 执行几次、当前 XML 生成几组 VALUES？答案：setter执行3次，一条 INSERT 中生成3组 VALUES。
 
 ## 11. 用 AI 开发时，自己负责什么
 
