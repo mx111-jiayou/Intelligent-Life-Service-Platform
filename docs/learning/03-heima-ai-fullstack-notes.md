@@ -27,7 +27,7 @@
 | 15 | 使用 AI 开发时的验收方法 |
 | 16 | 自测题与答案 |
 
-当前进度：2026-10-19，菜品管理核心流程已讲解，现进入黑马 Day 4 套餐管理的第一小节（第14节）：区分套餐信息、已有菜品、套餐包含关系，理解 setmeal_id、dish_id 和 copies。下一小节对照保存套餐的代码。这里只做代码阅读和概念讲解，没有实际创建套餐；讲过不等于已独立实现。
+当前进度：2026-10-19，套餐表与关联表的关系已讲解，本节在14.5对照新增套餐 saveWithDish：复制基本资料、插入并回填套餐ID、取得包含已有菜品ID的明细、给明细补充套餐ID、批量保存关系。下一节可继续套餐编辑或起售条件。这里只做代码阅读和讲解，没有实际创建套餐；理解情况以后续反馈为准。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -1776,6 +1776,83 @@ DTO 中的 `List<SetmealDish> setmealDishes` 可以类比此前 DishDTO 中的 f
 前面“被套餐使用的菜品不能删除”正是在查询 setmeal_dish 是否有包含该菜品的记录。
 
 小练习：关联表一行 `setmeal_id=20, dish_id=200, copies=2` 表示什么？答案：套餐20包含菜品200，共2份，不是套餐编号200，也不是创建两道新菜。
+
+### 14.5 新增套餐：代码执行顺序
+
+仍用套餐价32元的“宫保鸡丁套餐”，包含已有菜品100、200、300各1份。前端把套餐基本资料和完整的套餐明细一起提交给后端，Controller 调用 `setmealService.saveWithDish(setmealDTO)`。
+
+收到的 DTO 可理解为：
+
+```text
+setmealDTO
+├─ name：宫保鸡丁套餐
+├─ price：32
+├─ categoryId、image等基本字段
+└─ setmealDishes
+   ├─ dishId=100，copies=1（以及名称、菜品原价等字段）
+   ├─ dishId=200，copies=1
+   └─ dishId=300，copies=1
+```
+
+新增时菜品已经存在，所以前端选菜后明细里能提供 dishId。但新的套餐尚未保存，最终的套餐ID还需要插入后取得。以上是教学成功路径，不代表实际方法已完成对前端价格、菜品有效性、份数和非空列表的全部校验。
+
+**第一步：复制套餐基本字段并插入。**
+
+```java
+Setmeal setmeal = new Setmeal();
+BeanUtils.copyProperties(setmealDTO, setmeal);
+setmealMapper.insert(setmeal);
+```
+
+这一步操作 setmeal 表，不会把 setmealDishes 列表自动保存到关联表，也不会在 dish 表重新插入已有菜品。
+
+**第二步：读取回填的套餐ID。**
+
+```java
+Long setmealId = setmeal.getId();
+```
+
+Mapper XML 的 insert 配置了 `useGeneratedKeys="true" keyProperty="id"`，配合数据库生成主键，把值填回 setmeal.id。假设生成的套餐ID是20，这里读到的就是20。不要误认为这里读取的是菜品编号。
+
+**第三步：取得前端提交的菜品明细。**
+
+```java
+List<SetmealDish> setmealDishes = setmealDTO.getSetmealDishes();
+```
+
+List 中每个对象表示套餐包含的一项菜品。getter 取的是请求对象里的列表，不是重新查询菜品表。
+
+**第四步：为每项明细补上新套餐编号。**
+
+```java
+setmealDishes.forEach(setmealDish -> {
+    setmealDish.setSetmealId(setmealId);
+});
+```
+
+已有 dishId 仍为100、200、300，各自保留。每个对象的 setmealId 都设置成20：
+
+| setmealId | dishId | copies |
+| --- | --- | --- |
+| 20 | 100 | 1 |
+| 20 | 200 | 1 |
+| 20 | 300 | 1 |
+
+setSetmealId 是赋值套餐ID，不是修改 dishId。setter 只修改Java对象，尚未把明细写入数据库。
+
+**第五步：批量保存关联明细。**
+
+```java
+setmealDishMapper.insertBatch(setmealDishes);
+```
+
+实际 XML 用 foreach 生成多组 VALUES，写入 setmeal_dish 的 setmeal_id、dish_id、name、price、copies。这里存的是“套餐包含关系”，没有调用 dishMapper.insert，因此不会新建三道菜。
+
+实际 saveWithDish 上已有 `@Transactional`，在配置与调用正常生效、异常符合回滚规则时，新增套餐资料和新增关联明细作为同一事务处理。若明细保存失败，不应仅留下没有配置成功的套餐。没有实际执行回滚测试。
+
+对照已学过的菜品新增：先保存主资料并取得ID，再把这个ID补到多条附属明细，最后保存明细。但口味列表是 DishFlavor，套餐明细是 SetmealDish，含义与字段各不相同。
+
+小练习：明细原来 dishId=200，新套餐ID为20，调用 setSetmealId(20) 后 dishId 变成多少？答案：仍然是200，新增/补充的是 setmealId=20。
 
 ## 15. 用 AI 开发时，自己负责什么
 
