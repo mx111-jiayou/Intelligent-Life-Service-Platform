@@ -29,11 +29,11 @@
 | 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
 | 19 | Day 7 购物车：添加、数量累加、动态查询与按用户清空 |
-| 20 | Day 8 下单准备：地址簿、新增与查看收货地址 |
+| 20 | Day 8 下单准备：地址簿、新增、查看与切换默认地址 |
 | 21 | 使用 AI 开发时的验收方法 |
 | 22 | 自测题与答案 |
 
-当前进度：2026-10-20，地址簿已讲到20.4。用户追问为什么使用list，本次20.5区分单个AddressBook对象、List<AddressBook>集合、变量名list和方法名list；说明查询条件对象与查询结果集合的区别。默认地址尚未展开。未运行应用或进行接口联调。
+当前进度：2026-10-20，本节20.6—20.8讲默认地址：先将当前用户地址设为非默认，再把所选地址设为默认；用事务协调两次更新；查询时按userId和isDefault=1筛选，再从列表取单个对象。说明现有实现仍需目标地址归属与更新结果校验，不能把事务等同于权限或业务校验。下一阶段可进入下单流程。未运行应用或进行接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3872,6 +3872,92 @@ AddressBook getById(Long id);
 本节仅解释Java对象和集合在当前接口中的作用，不展开集合实现类、底层结构或Redis的List数据类型。
 
 自测：用户有3条地址，list方法应返回什么？包含3个AddressBook对象的List。把左边变量list改名为addresses，是否改变查询结果？不会，它只是结果变量的名字。
+
+### 20.6 切换默认地址：为什么先取消旧默认
+
+默认地址是业务上优先使用或供页面预选的收货地址，用户仍可为某次订单选择其他地址。默认标记保存在address_book.is_default字段中：0为非默认，1为默认；不是另建一条地址。
+
+假设用户7的地址201“学校”原本为默认，现在选择202“家”为默认：
+
+| 地址 | 原来 | 第一步后 | 第二步后 |
+| --- | --- | --- | --- |
+| 201 学校 | 1 | 0 | 0 |
+| 202 家 | 0 | 0 | 1 |
+
+如果只把202改成1，201仍为1，就会留下两条默认地址。因此当前代码先清除当前用户的默认标记，再设置目标地址。
+
+前端携带JWT调用PUT /user/addressBook/default，请求正文示意：
+
+```json
+{"id": 202}
+```
+
+其中id是选中的地址编号；当前用户编号由后端从BaseContext获取。
+
+Service实际实现：
+
+```java
+@Transactional
+public void setDefault(AddressBook addressBook) {
+    addressBook.setIsDefault(0);
+    addressBook.setUserId(BaseContext.getCurrentId());
+    addressBookMapper.updateIsDefaultByUserId(addressBook);
+
+    addressBook.setIsDefault(1);
+    addressBookMapper.update(addressBook);
+}
+```
+
+第一步设置对象中的userId=7、isDefault=0，再调用Mapper，SQL可用带值形式理解为：
+
+```sql
+update address_book set is_default = 0 where user_id = 7;
+```
+
+第二步把同一对象的isDefault改成1，id仍然是前端传入的202，再调用另一个Mapper方法。对于只提交id的本例，SQL可理解为：
+
+```sql
+update address_book set is_default = 1 where id = 202;
+```
+
+前一个方法按用户编号更新该用户的地址；后一个方法按地址编号更新目标记录。SQL实际使用参数绑定，不是把上述示例值写死。
+
+同一个Java对象可以被修改后再次作为参数传入。执行第一条SQL时读取的值是0，后面setIsDefault(1)不会追溯修改已经执行过的第一条SQL；第二次Mapper调用才把新值1用于下一条SQL。
+
+### 20.7 两次更新为什么加@Transactional
+
+切换默认地址是一个业务操作，内部包含两次数据库更新。如果旧默认已取消，而设置新默认时抛出符合回滚规则的异常，应该撤销本次已执行的更新，让原来的默认地址保留。
+
+当前方法的@Transactional用于把这两次更新放在同一个事务中。在事务正常生效的前提下，两步成功则提交；触发回滚的异常向外抛出时，已执行的第一步也会回滚。具体回滚规则可回看前面的事务笔记，不把“任何失败表现”一概等同于自动回滚。
+
+例如目标id不存在，UPDATE可能只是影响0行，并不自动抛出异常。当前方法没有检查影响行数，所以不能声称“选错地址也一定自动恢复旧默认”。
+
+现有第二步只使用WHERE id，没有增加user_id条件或预先确认目标归属。完整业务应先验证目标地址属于当前用户，并处理更新失败；仅设置Java对象的userId不会让XML自动增加过滤条件。也不能单凭@Transactional就声称已经保证并发下默认地址唯一。本节解释正常切换流程与源码边界，未修改代码。
+
+### 20.8 查询默认地址：列表方法也可以用于预期单条的查询
+
+前端调用GET /user/addressBook/default。Controller创建查询对象，设置：
+
+```java
+addressBook.setIsDefault(1);
+addressBook.setUserId(BaseContext.getCurrentId());
+List<AddressBook> list = addressBookService.list(addressBook);
+```
+
+用户7对应的SQL可理解为：
+
+```sql
+select * from address_book
+where user_id = 7 and is_default = 1;
+```
+
+这里仍然复用返回List的通用查询方法。正常情况下希望查到1条记录，Controller实际要求列表非null且size()==1，才返回Result.success(list.get(0))；返回给前端的data是一条AddressBook对象，不是整个List。
+
+list.size()表示元素数量；list.get(0)取第一个元素，Java列表下标从0开始。返回0条或多条时，当前代码都返回“没有查询到默认地址”的错误结果，并不是随意选择第一条。
+
+本节核对AddressBookController、AddressBookServiceImpl、AddressBookMapper及XML，只更新学习笔记。没有执行真实地址修改、事务回滚或权限测试。
+
+自测：为何不能只把新的地址设为1？旧默认若仍为1，就会有两个默认。第二次setIsDefault(1)会让第一条SQL重新执行吗？不会。设置默认地址是在插入新记录吗？不是，是更新已有地址的标记。
 
 ## 21. 用 AI 开发时，自己负责什么
 
