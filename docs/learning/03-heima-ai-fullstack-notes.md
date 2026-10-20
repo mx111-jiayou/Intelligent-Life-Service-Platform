@@ -29,10 +29,11 @@
 | 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
 | 19 | Day 7 购物车：添加、数量累加、动态查询与按用户清空 |
-| 20 | 使用 AI 开发时的验收方法 |
-| 21 | 自测题与答案 |
+| 20 | Day 8 下单准备：地址簿、新增与查看收货地址 |
+| 21 | 使用 AI 开发时的验收方法 |
+| 22 | 自测题与答案 |
 
-当前进度：2026-10-20，本节19.6—19.8讲查看和清空购物车：从BaseContext取得当前用户ID，用同一个动态查询方法查询特定商品或整份购物车，清空时按user_id删除该用户的购物车记录。已讲当前Controller可见的添加、查看、清空三个接口；下一阶段可衔接地址簿和下单。未运行应用或进行接口联调。
+当前进度：2026-10-20，进入Day 8下单准备。本节20.1—20.4讲地址簿：一个用户可保存多条地址，新增时后端补充当前userId并设为非默认，查看时按当前用户筛选。下一节讲默认地址的设置与查询，再衔接下单。未运行应用或进行接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3723,9 +3724,102 @@ delete from shopping_cart where user_id = 7;
 
 自测：用户7清空购物车时，用户8的记录会一起删除吗？正常按user_id=7删除时不会。查看整份购物车为什么不传dishId？因为要查该用户的全部待购商品，而不是限定某道菜。
 
-## 20. 用 AI 开发时，自己负责什么
+## 20. Day 8下单准备：收货地址
 
-### 20.1 描述一个可验收的需求
+### 20.1 购物车和地址分别解决什么问题
+
+购物车记录准备买哪些商品、各买几份；收货地址记录送到哪里、由谁收货、联系电话是什么。用户可以保存多条地址，在下单时选择其中一条。
+
+当前项目使用address_book表保存地址，每条地址属于一个用户。以下为虚构教学数据：
+
+| id（地址编号） | user_id（所属用户） | consignee（收货人） | detail（详细地址） | label（标签） |
+| --- | --- | --- | --- | --- |
+| 201 | 7 | 小明 | 校园宿舍3号楼 | 学校 |
+| 202 | 7 | 小明 | 示例小区2栋301室 | 家 |
+| 203 | 8 | 小红 | 示例写字楼5层 | 公司 |
+
+地址201和202都属于用户7。user表的一名用户可以对应address_book表中的多条记录，这是“一对多”关系。本节讲业务数据对应关系，不据此断言数据库已建立外键约束。
+
+主要字段：
+
+- id：这条地址自身的编号。
+- userId：地址属于哪个本地用户。
+- consignee、phone：收货人和联系电话。
+- provinceName、cityName、districtName、detail：省、市、区和详细地址。
+- label：家、公司、学校等标签。
+- isDefault：0表示非默认，1表示默认。
+
+用户编号7与地址编号201不能混用。用户可以选择自己的地址201或202，它们代表不同的收货地点。
+
+### 20.2 新增地址：用户填写内容，后端补充归属
+
+前端提交POST /user/addressBook，请求头authentication携带JWT，请求正文提供收货人、电话、地区、详细地址等信息。本项目Controller当前直接使用@RequestBody AddressBook接收，没有单独的新增地址DTO。
+
+```java
+public Result save(@RequestBody AddressBook addressBook) {
+    addressBookService.save(addressBook);
+    return Result.success();
+}
+```
+
+Service实际代码：
+
+```java
+public void save(AddressBook addressBook) {
+    addressBook.setUserId(BaseContext.getCurrentId());
+    addressBook.setIsDefault(0);
+    addressBookMapper.insert(addressBook);
+}
+```
+
+逐步理解：
+
+1. 从已经通过JWT验证的登录上下文取得本地userId，例如7，设置这条地址的所属用户。即使请求对象带有userId，这里也会覆盖为当前用户。
+2. 设置isDefault=0。本项目新增地址统一设为非默认，即使是第一条地址，也没有在这里自动设为默认。
+3. 调用Mapper执行INSERT，把地址保存到address_book表。前两个setter只修改Java对象，insert才写数据库。
+
+地址编号201是示例中的保存结果，不是要求前端把201传进来；当前INSERT列中不包含id，本节没有读取数据库建表语句或验证实际编号生成策略。
+
+### 20.3 查看地址列表：只带当前用户条件
+
+前端携带JWT调用GET /user/addressBook/list。Controller实际代码：
+
+```java
+AddressBook addressBook = new AddressBook();
+addressBook.setUserId(BaseContext.getCurrentId());
+List<AddressBook> list = addressBookService.list(addressBook);
+return Result.success(list);
+```
+
+这里的new AddressBook是创建查询条件对象，不会因为对象类型叫AddressBook就自动新增数据库记录。
+
+Service调用addressBookMapper.list，XML根据userId、phone、isDefault的非null值添加条件。当前列表入口只设置userId，因此用户7的正常查询可理解为：
+
+```sql
+select * from address_book where user_id = 7;
+```
+
+这会返回201、202两条地址，不返回用户8的203。购物车查询和地址列表复用了相同思路：从登录身份取用户编号，再限制查询范围。没有地址时，正常查询返回空列表。
+
+### 20.4 先连接到下单场景
+
+```text
+购物车：宫保鸡丁2份、米饭1份
+地址簿：学校地址201、家庭地址202
+本次选择：地址201
+       ↓
+后续下单业务需要结合商品和选中的收货地址
+```
+
+本节只是说明地址在下单中的用途，下单请求、校验和订单保存尚未展开。默认地址会影响默认选中哪条地址，下一节单独讲解。
+
+本节核对AddressBookController、AddressBookServiceImpl、AddressBook实体、AddressBookMapper及XML，只讲新增与列表。当前按id查询、更新和删除地址的代码路径没有显示对应user_id归属条件，不能因为列表按用户过滤就断言所有地址接口均已隔离用户；后续讲相应操作时应区分业务要求与现有实现。本次未修改业务代码或执行真实数据库操作。
+
+自测：用户7新增地址，应由前端决定它属于用户8吗？不应，后端按登录上下文设置用户7。新增第一条地址会自动成为默认吗？当前save方法设置isDefault=0，不会自动成为默认。
+
+## 21. 用 AI 开发时，自己负责什么
+
+### 21.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -3739,7 +3833,7 @@ delete from shopping_cart where user_id = 7;
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 20.2 验收比“代码能运行”多一步
+### 21.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -3752,7 +3846,7 @@ delete from shopping_cart where user_id = 7;
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 21. 自测与答案
+## 22. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -3848,6 +3942,11 @@ delete from shopping_cart where user_id = 7;
 - [购物车提交参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/ShoppingCartDTO.java)
 - [购物车Mapper](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/ShoppingCartMapper.java)
 - [购物车动态查询SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/ShoppingCartMapper.xml)
+- [收货地址接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/AddressBookController.java)
+- [收货地址业务](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/AddressBookServiceImpl.java)
+- [收货地址实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/AddressBook.java)
+- [收货地址Mapper](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/AddressBookMapper.java)
+- [收货地址动态SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/AddressBookMapper.xml)
 
 ### 已有学习资料
 
