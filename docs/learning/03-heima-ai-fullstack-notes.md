@@ -34,7 +34,7 @@
 | 22 | 使用 AI 开发时的验收方法 |
 | 23 | 自测题与答案 |
 
-当前进度：2026-10-20，进入21.1—21.4提交订单概览：前端选择地址，后端读取当前用户购物车，保存一条订单和多条商品明细，清空该用户购物车，返回订单信息。重点区分下单与支付、订单主表与明细、购买数量与明细条数。下一节可逐段拆解submitOrder代码、主键回填和明细循环。未运行应用、真实下单或支付。
+当前进度：2026-10-20，本节21.5—21.7拆解订单保存后的主键回填、购物车转订单明细的for循环、List.add与批量INSERT的区别。重点理解同一订单的每条明细为什么使用同一个orderId，以及Java对象操作和数据库操作的边界。下一节可继续订单返回结果、订单编号，或进入支付前的流程。未运行应用、真实下单或支付。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -4048,6 +4048,114 @@ submitOrder上有@Transactional。正常生效时，订单主表插入、明细�
 这些问题不在本次教学中直接修改；后续逐行讲解时应继续区分现有实现与完整实现应具备的校验。
 
 自测：买宫保鸡丁2份、米饭1份，本例产生几条订单、几条明细？1条订单、2条明细。清空购物车会删除刚保存的订单吗？不会，这里删除的是shopping_cart表中当前用户的记录。提交成功代表已支付吗？不代表。
+
+### 21.5 保存订单后，orders.getId为什么能取得ID
+
+本节接续上一节正常提交过程，假设订单已补齐相应字段，执行：
+
+```java
+orderMapper.insert(orders);
+```
+
+OrderMapper.xml配置：
+
+```xml
+<insert id="insert" parameterType="Orders"
+        useGeneratedKeys="true" keyProperty="id">
+```
+
+useGeneratedKeys用于取得数据库生成的主键，keyProperty="id"指定将值写回传入的orders对象的id属性。它不是开启数据库自增的开关；是否生成主键还依赖实际表结构和数据库。本节未读取建表语句或执行插入验证。
+
+按当前代码设计，若数据库成功插入并生成ID900，回填后的同一个orders对象就有id=900：
+
+```text
+准备Orders对象，id尚未设置
+       ↓
+Mapper执行INSERT，数据库生成订单ID900
+       ↓
+MyBatis把900写回orders.id
+       ↓
+orders.getId()读取900
+```
+
+orders.getId()只是读取Java对象属性，没有再次查询数据库，也没有重新生成编号。即使Mapper的insert方法返回类型是void，也可以通过这种方式修改传入对象的属性。
+
+注意订单数据库ID orders.id与业务订单号orders.number不同。本项目关系字段order_detail.order_id使用orders.id，不是number。
+
+### 21.6 把购物车列表转换成订单明细列表
+
+submitOrder中的实际代码：
+
+```java
+List<OrderDetail> orderDetailList = new ArrayList<>();
+for (ShoppingCart cart : shoppingCartlist) {
+    OrderDetail orderDetail = new OrderDetail();
+    BeanUtils.copyProperties(cart, orderDetail);
+    orderDetail.setOrderId(orders.getId());
+    orderDetailList.add(orderDetail);
+}
+orderDetailMapper.insertBatch(orderDetailList);
+```
+
+先把第一行读成“准备一个空的订单明细列表”。List<OrderDetail>说明列表装的是OrderDetail对象；new ArrayList<>()创建一个可往里添加元素的空列表。当前不展开集合底层实现。
+
+for (ShoppingCart cart : shoppingCartlist)表示按次序取出购物车列表里的每条记录，本轮取出的对象用变量cart表示。它不是按商品number的份数循环，而是按列表中记录的条数循环。
+
+假设有两条购物车记录：
+
+| 循环 | 当前cart代表的记录 | 创建并加入列表的明细 |
+| --- | --- | --- |
+| 第1次 | 宫保鸡丁，数量2 | 宫保鸡丁，数量2，orderId=900 |
+| 第2次 | 米饭，数量1 | 米饭，数量1，orderId=900 |
+
+循环内四行分别做什么：
+
+1. new OrderDetail()：为本轮商品创建新的明细对象。每轮都创建一个，两个商品使用两个对象。
+2. BeanUtils.copyProperties(cart, orderDetail)：复制名称、菜品或套餐编号、口味、数量、单价、图片等同名且类型兼容的属性。这是内存中对象属性的复制。
+3. setOrderId(orders.getId())：把本轮明细关联到刚创建的订单900。两轮处理的是同一笔订单，因此使用同一个orderId。
+4. orderDetailList.add(orderDetail)：把本轮明细对象加入Java列表，此时还没向order_detail表写入。
+
+为什么要单独设置orderId？购物车记录还没有所属订单的这个属性，需要在订单建立后，由业务代码补充。
+
+源码细节：ShoppingCart和OrderDetail都有id属性，copyProperties也可能复制购物车记录ID。但当前明细INSERT的列不包含id，所以不会把这个被复制的id作为明细主键写入。不能把购物车记录ID、明细自身ID与orderId三个编号混为一谈。
+
+### 21.7 List.add与insertBatch的区别
+
+循环结束后，内存中的orderDetailList可理解为：
+
+```text
+[
+  明细对象：orderId=900，宫保鸡丁，数量2，
+  明细对象：orderId=900，米饭，数量1
+]
+```
+
+随后执行：
+
+```java
+orderDetailMapper.insertBatch(orderDetailList);
+```
+
+这才调用MyBatis向数据库保存明细。XML的foreach遍历列表，拼出多组VALUES；本例可用省略其他列的教学SQL理解：
+
+```sql
+insert into order_detail (order_id, name, number)
+values
+    (900, '宫保鸡丁', 2),
+    (900, '米饭', 1);
+```
+
+实际XML还插入image、dish_id、setmeal_id、dish_flavor、amount等列，并使用参数绑定。Java里的for负责组装对象列表，XML里的foreach负责组装批量INSERT，两者作用不同。
+
+| 操作 | 发生在哪里 |
+| --- | --- |
+| new、set、copyProperties、List.add、getId | Java对象与集合的内存操作 |
+| orderMapper.insert | 写入订单主表，并按配置回填主键 |
+| orderDetailMapper.insertBatch | 将列表中的明细写入数据库 |
+
+明细保存之后，原方法再清空当前用户购物车、封装返回结果；这些后续步骤仍处于前面讲过的submitOrder调用过程。本节假设数据合法且订单插入成功，不把21.4记录的现有实现缺口当作已解决。
+
+自测：购物车有2条记录，其中一条数量为5，for循环执行几次？2次，按记录条数循环。只执行List.add会保存到数据库吗？不会。两条明细为何orderId相同？因为它们属于同一笔订单。
 
 ## 22. 用 AI 开发时，自己负责什么
 
