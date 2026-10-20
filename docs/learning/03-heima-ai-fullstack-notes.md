@@ -30,10 +30,11 @@
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
 | 19 | Day 7 购物车：添加、数量累加、动态查询与按用户清空 |
 | 20 | Day 8 下单准备：地址簿、新增、查看与切换默认地址 |
-| 21 | 使用 AI 开发时的验收方法 |
-| 22 | 自测题与答案 |
+| 21 | Day 8 提交订单：订单主表、明细与购物车清理 |
+| 22 | 使用 AI 开发时的验收方法 |
+| 23 | 自测题与答案 |
 
-当前进度：2026-10-20，本节20.6—20.8讲默认地址：先将当前用户地址设为非默认，再把所选地址设为默认；用事务协调两次更新；查询时按userId和isDefault=1筛选，再从列表取单个对象。说明现有实现仍需目标地址归属与更新结果校验，不能把事务等同于权限或业务校验。下一阶段可进入下单流程。未运行应用或进行接口联调。
+当前进度：2026-10-20，进入21.1—21.4提交订单概览：前端选择地址，后端读取当前用户购物车，保存一条订单和多条商品明细，清空该用户购物车，返回订单信息。重点区分下单与支付、订单主表与明细、购买数量与明细条数。下一节可逐段拆解submitOrder代码、主键回填和明细循环。未运行应用、真实下单或支付。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3959,9 +3960,98 @@ list.size()表示元素数量；list.get(0)取第一个元素，Java列表下标
 
 自测：为何不能只把新的地址设为1？旧默认若仍为1，就会有两个默认。第二次setIsDefault(1)会让第一条SQL重新执行吗？不会。设置默认地址是在插入新记录吗？不是，是更新已有地址的标记。
 
-## 21. 用 AI 开发时，自己负责什么
+## 21. Day 8：提交订单
 
-### 21.1 描述一个可验收的需求
+### 21.1 下单需要把哪些信息放在一起
+
+当前用户7的购物车有宫保鸡丁2份、米饭1份，选择自己的地址201，点击“提交订单”。
+
+前端携带JWT请求POST /user/order/submit。OrdersSubmitDTO包含addressBookId、payMethod、remark、estimatedDeliveryTime、deliveryStatus、tablewareNumber、tablewareStatus、packAmount和amount。下面仅示意部分字段，不是完整联调请求：
+
+```json
+{
+  "addressBookId": 201,
+  "remark": "送到后请联系我"
+}
+```
+
+这个DTO没有商品列表字段；当前后端根据登录上下文的userId查询购物车，取得本次商品数据。也没有前端传入的userId字段，用户归属由后端识别。
+
+提交订单与支付是两个阶段。本项目submitOrder显式设置payStatus=UN_PAID，即0；另外的payment方法才调用支付工具。点击提交订单、成功保存记录不等于已经完成付款。
+
+### 21.2 为什么订单要保存到两张表
+
+orders保存一笔订单的整体信息，如下单用户、收货地址编号、下单时间、支付状态等；order_detail保存这笔订单里每种商品的名称、口味、数量、金额等信息。
+
+教学示例，假设本次生成的订单数据库ID为900：
+
+orders订单主表，一条记录：
+
+| id | user_id | address_book_id | pay_status |
+| --- | --- | --- | --- |
+| 900 | 7 | 201 | 0（未支付） |
+
+order_detail订单明细表，两条记录：
+
+| order_id | dish_id | name | number | amount（单价） |
+| --- | --- | --- | --- | --- |
+| 900 | 100 | 宫保鸡丁 | 2 | 28 |
+| 900 | 200 | 米饭 | 1 | 2 |
+
+order_detail.order_id指向orders.id，所以两条明细都属于订单900。这是一笔订单对应多条商品明细的一对多关系。
+
+虽然买了3份食品，本例只产生2条明细，因为购物车有2条商品记录，每条分别保存自己的数量。不同口味若在购物车中分成不同记录，生成订单明细时也分别复制。
+
+orders.id是数据库记录ID；orders.number是业务订单号。当前代码用RedisIdWorker生成业务订单号；明细关联用orders.id。订单号生成细节本节暂不展开。
+
+### 21.3 项目里的保存顺序
+
+OrderServiceImpl.submitOrder的主要流程：
+
+1. 按addressBookId查询地址，不存在则抛出业务异常。
+2. 从BaseContext取得当前用户ID，查询该用户的购物车；为空则抛出业务异常。
+3. 创建Orders对象，复制提交参数，补充下单时间、未支付状态、业务订单号、收货人、电话、userId，插入orders表。
+4. 遍历购物车记录，每条复制成OrderDetail对象，设置orderId=orders.getId()，批量插入order_detail。
+5. 删除当前用户的购物车记录。
+6. 返回订单ID、业务订单号、下单时间、订单金额，供前端继续后续流程。
+
+核心关联代码：
+
+```java
+orderMapper.insert(orders);
+// 在后续的购物车遍历中：
+orderDetail.setOrderId(orders.getId());
+```
+
+OrderMapper.xml配置useGeneratedKeys=true、keyProperty=id，用于把数据库生成的订单主键回填到orders对象。先保存订单取得其ID，再让各条明细关联这个ID。
+
+订单明细从购物车复制了商品名称、图片、口味、数量、单价等字段，保留本次下单时复制到的数据。它们不是继续引用购物车记录本身，因此后面清空购物车不会把明细一起删掉。
+
+为什么不直接把购物车当历史订单？购物车会继续被增加、减少、清空，是当前准备购买的商品；订单需要保存这一次提交的购买记录。当前实现清空购物车发生在提交订单阶段，而非等到付款完成。
+
+### 21.4 用事务连接主表、明细和购物车清理
+
+submitOrder上有@Transactional。正常生效时，订单主表插入、明细插入、当前用户购物车清理共同组成数据库事务；发生符合回滚规则且向外抛出的异常，已执行的数据库变更应回滚。正常完成则提交。
+
+例如明细插入失败并触发回滚，不能只留下一个没有明细的订单。本节只说明当前事务边界，没有做真实失败注入或回滚测试，也不把Redis中的订单号生成当作随数据库事务自动撤销的操作。
+
+#### 当前源码与完整业务要求的区别
+
+本节核对OrderServiceImpl、OrdersSubmitDTO、Orders、OrderDetail、OrderSubmitVO、OrderMapper与两个XML。以下是源码中可见的边界，不把预期功能描述成已完成：
+
+- 地址检查只判断按id查询是否存在，未看到地址属于当前用户的校验。
+- DTO中的amount会被BeanUtils复制到Orders，当前submitOrder没有重新计算或校验订单总金额。
+- 显式设置了payStatus=0，但没有设置订单status为PENDING_PAYMENT；INSERT又包含status参数，不能声称实际订单状态已正确初始化为待付款。
+- 复制了收货人、电话与地址编号，但没有把地址内容组合赋给orders.address，不能声称已保存完整配送地址快照。
+- 当前购物车查询连续调用了两次，第一次返回值未使用。本节流程图按一次有用查询讲解，不声称源码没有重复调用。
+
+这些问题不在本次教学中直接修改；后续逐行讲解时应继续区分现有实现与完整实现应具备的校验。
+
+自测：买宫保鸡丁2份、米饭1份，本例产生几条订单、几条明细？1条订单、2条明细。清空购物车会删除刚保存的订单吗？不会，这里删除的是shopping_cart表中当前用户的记录。提交成功代表已支付吗？不代表。
+
+## 22. 用 AI 开发时，自己负责什么
+
+### 22.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -3975,7 +4065,7 @@ list.size()表示元素数量；list.get(0)取第一个元素，Java列表下标
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 21.2 验收比“代码能运行”多一步
+### 22.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -3988,7 +4078,7 @@ list.size()表示元素数量；list.get(0)取第一个元素，Java列表下标
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 22. 自测与答案
+## 23. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -4089,6 +4179,11 @@ list.size()表示元素数量；list.get(0)取第一个元素，Java列表下标
 - [收货地址实体](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/entity/AddressBook.java)
 - [收货地址Mapper](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/AddressBookMapper.java)
 - [收货地址动态SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/AddressBookMapper.xml)
+- [用户下单接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/OrderController.java)
+- [提交订单业务](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/OrderServiceImpl.java)
+- [提交订单参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/OrdersSubmitDTO.java)
+- [订单主表SQL与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/OrderMapper.xml)
+- [订单明细批量保存SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/OrderDetailMapper.xml)
 
 ### 已有学习资料
 
