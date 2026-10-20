@@ -25,13 +25,13 @@
 | 13 | 编辑菜品：回显口味、替换口味列表与事务边界 |
 | 14 | Day 4 套餐管理：套餐、菜品与关联表 |
 | 15 | Day 5 店铺营业状态与 Redis 入门 |
-| 16 | Day 6 微信登录：code、openid、本地用户与token |
+| 16 | Day 6 微信登录：code、openid、本地用户、token 与 HttpClient |
 | 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
 | 19 | 使用 AI 开发时的验收方法 |
 | 20 | 自测题与答案 |
 
-当前进度：2026-10-20，菜品手写缓存读写与清理已讲解。本节进入18.8 Spring Cache：套餐列表用@Cacheable按categoryId缓存方法返回值，管理端用@CacheEvict清单项或整个套餐缓存区域，并说明@EnableCaching和CacheManager的作用。下一阶段可进入购物车。未运行应用确认实际缓存管理器或进行真实缓存测试。
+当前进度：2026-10-20，已讲到18.8 Spring Cache。本次按用户追问补充18.9：缓存注解与手写Redis的适用区别；回到16.8细讲HttpClient：本项目后端作为请求方调用微信，区分准备参数、创建请求、execute真正发送、读取响应正文与解析openid。购物车尚未开始。未运行真实微信登录或缓存测试。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2862,6 +2862,102 @@ token缺失、签名校验失败、过期、载荷字段不符合预期等导致
 
 小练习：token经校验代表用户7，但请求参数随意写userId=8，能否直接当作用户8？答案：不能，当前身份应来自已验证token；记录操作仍需归属校验。登录接口为什么可以不带token？因为它在该拦截器的排除路径中。
 
+### 16.8 回头细讲 HttpClient：后端怎样请求别人的接口
+
+HttpClient是让Java程序发送HTTP请求、接收HTTP响应的工具。这个项目用Apache HttpClient；HttpClientUtil是项目自己封装的工具类，其内部调用Apache提供的类。二者不要混为一谈。
+
+先回忆两段通信：
+
+```text
+小程序 --HTTP请求--> 本项目后端 --HTTP请求--> 微信服务器
+小程序 <--登录结果-- 本项目后端 <--JSON响应-- 微信服务器
+```
+
+本项目后端接收小程序请求时扮演服务端；请求微信时又扮演客户端。客户端是一段通信中的角色，不专指前端页面。小程序请求本项目登录接口用POST，后端调用微信接口用GET，这是两个独立请求。
+
+#### 业务层传给工具什么
+
+UserServiceImpl.getOpenid里的实际代码：
+
+```java
+Map<String, String> map = new HashMap<>();
+map.put("appid", wxChatProperties.getAppid());
+map.put("secret", wxChatProperties.getSecret());
+map.put("js_code", code);
+map.put("grant_type", "authorization_code");
+
+String json = HttpClientUtil.doGet(WECHAT_LOGIN, map);
+JSONObject jsonObject = JSON.parseObject(json);
+String openid = jsonObject.getString("openid");
+```
+
+WECHAT_LOGIN提供目标地址；map提供对方接口要求的参数。map.put只是把数据放进Java内存，没有联网；调用doGet后，工具内部的execute才真正发送请求。json接收工具返回的响应正文文本；它既不是请求地址，也不是openid本身。
+
+#### doGet内部按什么顺序执行
+
+下面保留源码正常路径的关键步骤，省略状态判断、异常处理和资源关闭，供理解顺序，不能作为完整替代实现：
+
+```java
+CloseableHttpClient httpClient = HttpClients.createDefault();
+
+URIBuilder builder = new URIBuilder(url);
+for (String key : paramMap.keySet()) {
+    builder.addParameter(key, paramMap.get(key));
+}
+URI uri = builder.build();
+
+HttpGet httpGet = new HttpGet(uri);
+CloseableHttpResponse response = httpClient.execute(httpGet);
+String result = EntityUtils.toString(response.getEntity(), "UTF-8");
+```
+
+| 代码 | 作用 | 是否已经把本次请求发给微信 |
+| --- | --- | --- |
+| HttpClients.createDefault() | 创建发送请求的工具对象 | 否 |
+| builder.addParameter(...) | 把参数加入目标URI，负责相应编码 | 否 |
+| new HttpGet(uri) | 创建GET请求对象 | 否 |
+| httpClient.execute(httpGet) | 真正发起请求，当前调用等待响应 | 是 |
+| response.getEntity() | 取得响应正文实体 | 响应已收到 |
+| EntityUtils.toString(...) | 把正文内容按UTF-8读取为字符串 | 不再发起新请求 |
+
+查询参数组织方式的简化示意（均为虚构值，不是完整微信请求）：
+
+```text
+接口地址?appid=demo_app&js_code=demo_code&...
+```
+
+不需要自己把真实secret拼到代码示例、日志或浏览器地址中。项目由URIBuilder组织参数。
+
+HttpClientUtil.doGet实际只在HTTP状态码200时把正文读入result，之后return result。它返回的是正文字符串，不是整个响应对象；响应对象还包含状态、响应头等内容。
+
+#### 返回JSON文本后为什么还要解析
+
+假设微信成功响应的正文包含以下内容（简化示例，并非完整响应）：
+
+```json
+{"openid":"wx_user_A"}
+```
+
+三个变量分开理解：
+
+- json：整段JSON文本，Java类型为String。
+- jsonObject：JSON.parseObject(json)解析得到的对象，可以按字段名取值。
+- openid：jsonObject.getString("openid")取出的字段值，即wx_user_A。
+
+HttpClient负责请求与接收；JSON解析负责从收到的内容中提取字段。解析不会再次请求微信，也不会自行生成openid。HTTP200只代表HTTP层面的成功响应，不能代替检查微信业务结果。
+
+最后getOpenid返回openid给wxLogin，后续才查询本地用户、必要时注册、由Controller生成本项目token。HttpClient不会自己查询本地数据库或生成JWT。
+
+#### 目前需要掌握的程度
+
+先看懂目标地址、请求方式、参数、响应、解析这五件事。工具类中的表单POST与JSON POST本节不展开，不要求背完封装代码。
+
+源码阅读补充：当前doGet没有调用builderRequestConfig设置本工具定义的5秒超时；不能因为类里有TIMEOUT_MSEC就说此GET已经配置好5秒。finally中的response.close也缺少null保护。本节仅解释现状，未修改工具或发起真实微信请求。
+
+自测：new HttpGet(uri)是否已经发请求？没有，execute才发送。doGet返回openid吗？不直接返回，它返回响应正文字符串，再由getOpenid解析取出openid。
+
+对照资料：[Apache HttpClient 4.5官方快速入门](https://hc.apache.org/httpcomponents-client-4.5.x/quickstart.html)。本节按项目实际使用的API解释，不把其他大版本的代码直接套进来。
+
 ## 17. Day 6：商品浏览
 
 ### 17.1 从页面的一次点击开始
@@ -3187,6 +3283,22 @@ public Result<List<Setmeal>> list(Long categoryId) {
 注解减少重复代码，但开发者仍要决定缓存的结果、键、过期策略和变更后的清理范围。@CachePut本节暂不展开。
 
 自测：分类2命中@Cacheable的缓存时，方法体中的setmealService.list还执行吗？答：正常缓存命中下不执行。allEntries=true会删除MySQL菜品吗？不会，它清理指定缓存区域。
+
+### 18.9 为什么黑马点评里看到更多手写Redis，缓存注解要学多深
+
+@Cacheable、@CacheEvict是Spring提供的缓存注解，可以用于方法结果的缓存与失效处理，是开发中的一种常见选择，但并非每个Redis功能都适合用它们表达。不需要因为一个课程项目没有多用，就推断它们没用；也不需要认为所有缓存都应该改成注解。
+
+| 需求 | 可以怎样实现 |
+| --- | --- |
+| 按分类缓存一次查询的返回结果 | 可用Spring Cache注解，或手写读写流程 |
+| 需要明确控制读写顺序、特殊过期与重建逻辑 | 可直接使用RedisTemplate等工具组织逻辑 |
+| 排行榜、签到、分布式锁等Redis用途 | 按业务使用相应数据结构与命令，不能当成普通方法结果缓存 |
+
+根据用户所述，黑马点评中看到较多手写Redis。手写方式便于观察每一步缓存读写，也便于展示穿透、击穿等问题的处理；这里解释这种写法适合什么场景，没有读取用户的黑马点评仓库或核验具体课程选型原因。
+
+当前学习要求：理解@Cacheable负责按规则读取和填充缓存，@CacheEvict负责失效清理；同时能看懂手写get、查库、set、delete。先掌握数据流与失效规则，注解参数需要时查文档。
+
+资料：[Spring缓存注解说明](https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html)。
 
 ## 19. 用 AI 开发时，自己负责什么
 
