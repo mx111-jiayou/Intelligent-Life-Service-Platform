@@ -34,7 +34,7 @@
 | 22 | 使用 AI 开发时的验收方法 |
 | 23 | 自测题与答案 |
 
-当前进度：2026-10-20，本节21.5—21.7拆解订单保存后的主键回填、购物车转订单明细的for循环、List.add与批量INSERT的区别。重点理解同一订单的每条明细为什么使用同一个orderId，以及Java对象操作和数据库操作的边界。下一节可继续订单返回结果、订单编号，或进入支付前的流程。未运行应用、真实下单或支付。
+当前进度：2026-10-20，本节21.8—21.10讲下单返回结果：OrderSubmitVO封装订单ID、业务订单号、金额和时间，Controller用Result包装；前端取得orderNumber后，另发支付请求。区分数据库ID与业务订单号，以及接口成功与支付成功。下一节可讲支付参数、前端调起支付和支付结果确认。未运行应用、真实下单或支付。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -4156,6 +4156,104 @@ values
 明细保存之后，原方法再清空当前用户购物车、封装返回结果；这些后续步骤仍处于前面讲过的submitOrder调用过程。本节假设数据合法且订单插入成功，不把21.4记录的现有实现缺口当作已解决。
 
 自测：购物车有2条记录，其中一条数量为5，for循环执行几次？2次，按记录条数循环。只执行List.add会保存到数据库吗？不会。两条明细为何orderId相同？因为它们属于同一笔订单。
+
+### 21.8 订单保存完，为什么还要返回OrderSubmitVO
+
+订单和明细保存、购物车清理后，前端还需要知道刚创建的是哪一笔订单，才能显示下单结果并继续付款。submitOrder最后的实际代码：
+
+```java
+OrderSubmitVO orderSubmitVO = OrderSubmitVO.builder()
+        .id(orders.getId())
+        .orderTime(orders.getOrderTime())
+        .orderNumber(orders.getNumber())
+        .orderAmount(orders.getAmount())
+        .build();
+return orderSubmitVO;
+```
+
+这里是从已有orders对象取出四个值，组装返回对象，不是再次插入订单或生成另一张订单。builder只是创建对象并设置属性的一种写法。
+
+| VO字段 | 来自哪里 | 作用 |
+| --- | --- | --- |
+| id | orders.getId() | 标识数据库里的这条订单记录 |
+| orderNumber | orders.getNumber() | 对外业务流程使用的订单号，后续支付请求使用它 |
+| orderAmount | orders.getAmount() | 本次订单记录保存的金额 |
+| orderTime | orders.getOrderTime() | 本次下单时间 |
+
+Service的return先把对象交回调用它的Controller。Controller再执行：
+
+```java
+return Result.success(orderSubmitVO);
+```
+
+统一返回对象中code=1表示本次下单接口成功，data放OrderSubmitVO。简化JSON示意，省略msg和orderTime，编号及金额均为教学数据：
+
+```json
+{
+  "code": 1,
+  "data": {
+    "id": 900,
+    "orderNumber": "387654321000012345",
+    "orderAmount": 58
+  }
+}
+```
+
+这不等于payStatus=1，不代表钱已经支付；接口结果code和订单支付状态payStatus是不同字段。
+
+### 21.9 为什么同时有id和orderNumber
+
+这是项目给同一笔订单设置的两个标识：
+
+| 标识 | 当前项目如何取得 | 本例中的用途 |
+| --- | --- | --- |
+| orders.id | 插入订单时，按Mapper配置取得数据库生成主键并回填 | 明细order_detail.order_id关联它 |
+| orders.number，返回时叫orderNumber | 应用调用RedisIdWorker.nextOrderId()，转成String | 支付接口按业务订单号查订单 |
+
+RedisIdWorker位于sky-server模块，当前实现组合时间部分和Redis自增序号。本节只说明编号来源，不展开位运算或做绝对不重复的保证；它没有向orders表插入数据。
+
+Orders对象属性叫number，OrderSubmitVO属性叫orderNumber，代码显式把前者赋给后者。不同对象的字段名不必完全相同。业务订单号也不直接写入明细order_id，不能和900这个数据库ID混用。
+
+两个标识是当前项目的设计选择，不是所有系统都必须采用两套编号。
+
+### 21.10 前端拿到订单号后，怎样继续支付
+
+下一步是另一次请求，当前Controller提供PUT /user/order/payment。前端携带JWT，正文示意：
+
+```json
+{
+  "orderNumber": "387654321000012345",
+  "payMethod": 1
+}
+```
+
+OrdersPaymentDTO当前只有orderNumber和payMethod；用户不必手动输入订单号，由前端代码从刚才的下单响应中取得。payMethod=1按项目定义表示微信支付，但当前payment方法直接使用微信支付工具，没有按该字段切换其他支付渠道。
+
+payment方法用订单号查到已保存的订单：
+
+```java
+Orders orders = orderMapper.getByNumber(ordersPaymentDTO.getOrderNumber());
+```
+
+如果订单不存在，抛出业务异常；否则调用支付工具时使用orders.getAmount()作为金额。支付请求本身没有让前端再次传amount，但不能因此认定金额已可信校验：21.4已记录下单阶段直接复制前端总金额的问题。当前支付方法也未看到对查得订单与当前用户归属的显式校验。
+
+```text
+提交订单请求
+    ↓
+后端保存订单，返回orderNumber等信息
+    ↓
+前端保存或传递该订单号
+    ↓
+用户继续付款时，前端发起支付请求
+    ↓
+后端按订单号查订单，进入微信预支付流程
+```
+
+这里不表示前端只要调用payment就已经扣款。当前代码返回OrderPaymentVO支付参数；调起支付及确认支付结果留到下一节。也没有核验真实小程序页面是否自动触发支付请求，本节描述接口之间应如何连接。
+
+本节核对OrderSubmitVO、OrdersPaymentDTO、OrderController、OrderServiceImpl、RedisIdWorker和Result。只更新学习笔记，没有发送真实下单或支付请求。
+
+自测：Result里的code=1能说明已经付钱吗？不能，它只表示当前接口成功。后续支付请求使用的是订单明细列表、数据库ID还是orderNumber？当前接口使用orderNumber。
 
 ## 22. 用 AI 开发时，自己负责什么
 
