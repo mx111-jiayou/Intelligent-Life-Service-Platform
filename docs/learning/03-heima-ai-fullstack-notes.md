@@ -29,7 +29,7 @@
 | 17 | 使用 AI 开发时的验收方法 |
 | 18 | 自测题与答案 |
 
-当前进度：2026-10-20，继续完成16.5的本地用户匹配与token生成讲解：openid查用户，首次创建并回填本地ID，Service返回User给Controller，Controller用用户ID、签名密钥和有效时长生成JWT并组装VO。下一节可解释后续请求如何校验token并识别当前用户，再继续商品浏览。没有实际进行登录或签发真实凭证；本节代码是否理解仍以后续反馈为准。
+当前进度：2026-10-20，token生成已讲解，本节进入16.7：用户端按authentication请求头携带token，拦截器校验签名与有效期，取userId存入BaseContext，再放行到业务；失败返回401。下一节可继续商品浏览。仅阅读源码并整理笔记，没有运行真实登录或接口鉴权测试。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2782,6 +2782,84 @@ openid=wx_A
 
 小练习：顾客第一次登录已创建user.id=7，之后再次通过微信取得同一小程序下的相同openid，正常情况下本项目使用旧ID7还是新建ID？答案：使用已有ID7；本系统token可以重新签发，不意味着用户记录重建。
 
+### 16.7 后续请求：后端如何检查token并识别用户
+
+登录返回token后，客户端调用受保护接口时携带它。当前项目配置中的用户端请求头名是authentication，管理端是token，两者不能混淆；这里是读取配置键名，没有展示任何真实密钥。
+
+```text
+用户端请求头示意：
+authentication: 登录返回的token字符串
+```
+
+这是当前项目的约定，不是说所有接口都必须使用这个头名，也没有在当前解析前额外剥离Bearer前缀。
+
+#### 请求先经过拦截器
+
+WebMvcConfiguration注册JwtTokenUserInterceptor用于/user/**。登录接口/user/user/login和店铺状态/user/shop/status被排除，因而登录前不需要先有token才能调用登录接口。
+
+```text
+请求到达
+  → 匹配保护路径的Controller请求先经过拦截器
+      → 验证通过：执行Controller、Service
+      → 验证失败：返回401，业务方法不继续执行
+```
+
+拦截器不是微信接口，也不是前端按钮判断；它在本项目后端统一处理这类请求。当前preHandle对非HandlerMethod资源另有放行分支，本节关注业务Controller请求。
+
+#### 读取头、校验并取出用户ID
+
+实际读取：
+
+```java
+String token = request.getHeader(jwtProperties.getUserTokenName());
+```
+
+在当前用户端配置下，可理解为从authentication头中取字符串。客户端没有发送或头名不对应，后端就无法从这个位置取到可用凭证。
+
+```java
+Claims claims = JwtUtil.parseJWT(jwtProperties.getUserSecretKey(), token);
+Long userId = Long.valueOf(claims.get(JwtClaimsConstant.USER_ID).toString());
+```
+
+parseJWT内部用配置的签名密钥调用parseClaimsJws，校验签名并按库的规则检查过期声明等，再取得载荷。不是只把字符串切开、读出数字就信任。
+
+JwtClaimsConstant.USER_ID的值是userId，对应登录时写入claims的字段。假设校验成功后的载荷记录userId=7，第二行把它读出并转换为Long，当前用户身份就是本地用户7。
+
+校验使用的是本项目JWT签名密钥，不是又向微信换openid，也不是用小程序AppSecret验本系统token。JWT签名不等于把载荷做保密加密，不能因为可解码看到字段就认为能随意改字段后仍通过签名校验。
+
+#### 把身份交给后续业务
+
+```java
+BaseContext.setCurrentId(userId);
+return true;
+```
+
+把通过校验的ID保存到当前处理线程的上下文，再放行。购物车Service已有如下用法：
+
+```java
+Long userId = BaseContext.getCurrentId();
+shoppingCart.setUserId(userId);
+```
+
+所以业务代码可以取得当前用户，不需要相信前端任意提交的用户ID。BaseContext不重新调用微信、不重新解析token，也不是把身份永久存进数据库；它的线程隔离、请求结束清理与异步边界见8.2，本次所读拦截器未展示结束时清理的实现。
+
+#### 失败时的行为
+
+```java
+catch (Exception ex) {
+    response.setStatus(401);
+    return false;
+}
+```
+
+token缺失、签名校验失败、过期、载荷字段不符合预期等导致异常，当前拦截器返回HTTP401并停止正常执行。这里没有生成统一的code/msg/data JSON错误体；前端需要检查HTTP状态，而不是只检查业务code。
+
+身份校验通过也不等于允许操作任意订单；后续还要按业务规则检查记录归属和权限。校验token不会自动给它续期，与此前Redis普通get不自动续期可以类比理解为“读取校验”和“发新凭证/延长期限”是不同动作，但具体存储机制并不相同。
+
+本节只是代码讲解，没有输出真实token、修改拦截器或执行401测试。
+
+小练习：token经校验代表用户7，但请求参数随意写userId=8，能否直接当作用户8？答案：不能，当前身份应来自已验证token；记录操作仍需归属校验。登录接口为什么可以不带token？因为它在该拦截器的排除路径中。
+
 ## 17. 用 AI 开发时，自己负责什么
 
 ### 17.1 描述一个可验收的需求
@@ -2897,6 +2975,8 @@ openid=wx_A
 - [用户插入与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/UserMapper.xml)
 - [HTTP请求工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/HttpClientUtil.java)
 - [JWT签发与校验工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/JwtUtil.java)
+- [用户端JWT拦截器](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/interceptor/JwtTokenUserInterceptor.java)
+- [接口保护路径配置](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/config/WebMvcConfiguration.java)
 
 ### 已有学习资料
 
