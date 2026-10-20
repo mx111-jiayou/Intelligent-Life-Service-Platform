@@ -28,10 +28,11 @@
 | 16 | Day 6 微信登录：code、openid、本地用户、token 与 HttpClient |
 | 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
-| 19 | 使用 AI 开发时的验收方法 |
-| 20 | 自测题与答案 |
+| 19 | Day 7 购物车：识别用户、添加商品与数量累加 |
+| 20 | 使用 AI 开发时的验收方法 |
+| 21 | 自测题与答案 |
 
-当前进度：2026-10-20，主线已讲到18.8 Spring Cache，正在补讲微信登录。本次16.12集中区分openid和JWT token：前者对应微信用户与本地账号，后者由本项目签发，供后续请求验证登录凭证并识别本地用户。暂不推进购物车业务；未运行真实微信登录或接口联调。
+当前进度：2026-10-20，用户要求继续，回到Day 7主线。本节19.1—19.5讲添加购物车：请求携带JWT，后端从BaseContext取得本地用户ID，按用户和商品条件查询购物车，已存在则数量加一，不存在则查商品信息并插入。下一节可继续拆解购物车查询的动态SQL以及查看、清空购物车。未运行应用或进行接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3471,9 +3472,117 @@ public Result<List<Setmeal>> list(Long categoryId) {
 
 资料：[Spring缓存注解说明](https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html)。
 
-## 19. 用 AI 开发时，自己负责什么
+## 19. Day 7：购物车
 
-### 19.1 描述一个可验收的需求
+### 19.1 先看用户点击“加号”发生什么
+
+假设用户7在宫保鸡丁（菜品100）上选择“微辣”，然后点击一次加号：
+
+```text
+购物车原来没有这份商品 → 增加一条记录，数量为1
+再次点击同样商品的加号 → 已有记录的数量变为2
+```
+
+本节先讲正常、依次发起请求的情况。添加购物车保存的是待购买商品，尚未创建订单或付款。当前项目购物车通过Mapper保存到MySQL的shopping_cart表。
+
+表中一条记录可以理解为“某个用户选中的某种商品及口味”。下面是两次点击后的教学示例，编号和价格均为虚构：
+
+| id（购物车记录ID） | user_id | dish_id | dish_flavor | number | amount |
+| --- | --- | --- | --- | --- | --- |
+| 501 | 7 | 100 | 微辣 | 2 | 28 |
+
+501标识这条购物车记录，7标识用户，100标识菜品，三个ID不要混淆。当前添加逻辑把商品单价写入amount，所以两份的金额为2×28=56，不能把amount=28理解成两份的合计。
+
+### 19.2 前端提供“买什么”，后端识别“谁在买”
+
+添加接口为POST /user/shoppingCart/add。请求正文示意：
+
+```json
+{
+  "dishId": 100,
+  "dishFlavor": "微辣"
+}
+```
+
+同时请求头authentication携带登录时取得的JWT。正常添加菜品时提供dishId，添加套餐时提供setmealId；ShoppingCartDTO包含dishId、setmealId、dishFlavor三个字段，没有userId、价格和数量字段。本接口一次调用表示加一份。
+
+后端拦截器验证JWT，从中读取本地userId，放入BaseContext。Service中实际代码：
+
+```java
+ShoppingCart shoppingCart = new ShoppingCart();
+BeanUtils.copyProperties(shoppingCartDTO, shoppingCart);
+Long userId = BaseContext.getCurrentId();
+shoppingCart.setUserId(userId);
+```
+
+前两行创建内存对象并复制商品条件；后两行补充当前用户ID。到这里还没有插入数据库。BaseContext取得的是前面从JWT识别出的本地userId，不是再次请求微信，也不是openid。
+
+假设当前用户是7，shoppingCart此时包含userId=7、dishId=100、dishFlavor=微辣，用于下一步查询。
+
+### 19.3 先查询，有相同商品就增加数量
+
+实际代码：
+
+```java
+List<ShoppingCart> list = shoppingCartMapper.list(shoppingCart);
+if (list != null && list.size() > 0) {
+    ShoppingCart cart = list.get(0);
+    cart.setNumber(cart.getNumber() + 1);
+    shoppingCartMapper.updateNumberById(cart);
+}
+```
+
+本例查询含义：“用户7的购物车里，是否已有菜品100、口味微辣的记录？”
+
+list.get(0)取得查询结果中的第一条购物车记录；cart.setNumber只改变Java对象里的数量，updateNumberById才执行数据库更新。对应Mapper：
+
+```sql
+update shopping_cart set number = #{number} where id = #{id}
+```
+
+如果查到购物车记录501，原数量是1，更新后就是2。WHERE里的id使用购物车记录的id，不是dish_id。
+
+按当前XML，userId、dishId、setmealId、dishFlavor都是非null才加入查询条件。示例明确传了“微辣”，因此会按该口味匹配；如果dishFlavor为null，SQL会省略口味条件，不能说它自动按“无口味”精确匹配。本节不修改这一现有行为。
+
+### 19.4 如果没有，就补充商品信息并插入
+
+Service的else分支按dishId是否非null区分菜品与套餐：
+
+- 添加菜品：dishMapper.getById(dishId)，取得名称、图片和价格。
+- 添加套餐：setmealMapper.getById(setmealId)，取得名称、图片和价格。
+
+再设置购物车记录：
+
+```java
+shoppingCart.setNumber(1);
+shoppingCart.setCreateTime(LocalDateTime.now());
+shoppingCartMapper.insert(shoppingCart);
+```
+
+name、image、amount来自后端查询到的商品信息；本接口不接收前端自行指定的价格。第一次添加是INSERT，已存在时是UPDATE。购物车记录中保存dishId或setmealId，用于关联所选商品。
+
+### 19.5 把一次添加串起来
+
+```text
+前端提交商品与口味，并携带JWT
+       ↓
+拦截器验证JWT，识别当前用户
+       ↓
+Service补充userId，查询购物车
+       ↓
+已有匹配记录：数量加一，UPDATE
+没有匹配记录：查商品资料，数量设为1，INSERT
+```
+
+小明和小红即使都选择菜品100、口味微辣，因为userId不同，也应各自在自己的购物车中记录数量。口味明确传入时，同一用户的微辣和特辣按不同条件查询。
+
+本节核对ShoppingCartController、ShoppingCartServiceImpl、ShoppingCartDTO、ShoppingCart实体、ShoppingCartMapper及XML；解释正常流程，不声称已验证并发点击、请求重试或非法参数。本节仅更新学习笔记。
+
+自测：连续两次正常添加同一份微辣宫保鸡丁，第一次新增记录数量1，第二次做什么？查询已有记录并把数量更新为2。当前用户编号从哪里来？通过JWT校验后，由BaseContext提供。
+
+## 20. 用 AI 开发时，自己负责什么
+
+### 20.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -3487,7 +3596,7 @@ public Result<List<Setmeal>> list(Long categoryId) {
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 19.2 验收比“代码能运行”多一步
+### 20.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -3500,7 +3609,7 @@ public Result<List<Setmeal>> list(Long categoryId) {
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 20. 自测与答案
+## 21. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -3591,6 +3700,11 @@ public Result<List<Setmeal>> list(Long categoryId) {
 - [用户端分类浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/CategoryController.java)
 - [用户端菜品浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/DishController.java)
 - [用户端套餐浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/SetmealController.java)
+- [购物车接口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/ShoppingCartController.java)
+- [购物车业务](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/service/impl/ShoppingCartServiceImpl.java)
+- [购物车提交参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/ShoppingCartDTO.java)
+- [购物车Mapper](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/mapper/ShoppingCartMapper.java)
+- [购物车动态查询SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/ShoppingCartMapper.xml)
 
 ### 已有学习资料
 
