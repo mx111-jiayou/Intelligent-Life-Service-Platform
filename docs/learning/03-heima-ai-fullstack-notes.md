@@ -33,7 +33,7 @@
 | 21 | 使用 AI 开发时的验收方法 |
 | 22 | 自测题与答案 |
 
-当前进度：2026-10-20，进入Day 8下单准备。本节20.1—20.4讲地址簿：一个用户可保存多条地址，新增时后端补充当前userId并设为非默认，查看时按当前用户筛选。下一节讲默认地址的设置与查询，再衔接下单。未运行应用或进行接口联调。
+当前进度：2026-10-20，地址簿已讲到20.4。用户追问为什么使用list，本次20.5区分单个AddressBook对象、List<AddressBook>集合、变量名list和方法名list；说明查询条件对象与查询结果集合的区别。默认地址尚未展开。未运行应用或进行接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3816,6 +3816,62 @@ select * from address_book where user_id = 7;
 本节核对AddressBookController、AddressBookServiceImpl、AddressBook实体、AddressBookMapper及XML，只讲新增与列表。当前按id查询、更新和删除地址的代码路径没有显示对应user_id归属条件，不能因为列表按用户过滤就断言所有地址接口均已隔离用户；后续讲相应操作时应区分业务要求与现有实现。本次未修改业务代码或执行真实数据库操作。
 
 自测：用户7新增地址，应由前端决定它属于用户8吗？不应，后端按登录上下文设置用户7。新增第一条地址会自动成为默认吗？当前save方法设置isDefault=0，不会自动成为默认。
+
+### 20.5 为什么使用List：一次查询可能返回多条地址
+
+用户问“为什么要使用list”，对应上一节代码：
+
+```java
+List<AddressBook> list = addressBookService.list(addressBook);
+```
+
+这里查询的是当前用户的所有收货地址，一个用户可能有学校、家、公司等多条地址，所以使用集合接收。一个AddressBook对象在本例中表示一条地址记录；List<AddressBook>表示由这类对象组成的列表，可以包含0条、1条或多条地址。
+
+```text
+一个AddressBook对象：
+地址201，学校
+
+一个List<AddressBook>集合：
+[
+  地址201，学校,
+  地址202，家
+]
+```
+
+即使当前用户只有一个地址，查询所有地址的方法也继续返回列表，其中包含一个元素，不必随着查询条数改变返回类型。
+
+#### 同一行中三个list分别是什么
+
+| 写法 | 含义 |
+| --- | --- |
+| List<AddressBook> | Java集合类型，表示元素类型为AddressBook的列表 |
+| 左边的小写list | 接收结果的变量名，开发者自己起的名字 |
+| 右边的.list(addressBook) | 调用Service中名为list的查询方法 |
+
+为了看得清楚，可以把接收结果的变量换个名字，含义不变：
+
+```java
+List<AddressBook> addresses = addressBookService.list(addressBook);
+```
+
+读成：“把addressBook中的查询条件交给Service，查询得到一组地址，用addresses这个变量接住。”
+
+这里传进去的addressBook只设置了userId=7，表示“查用户7的地址”；它本身不是已查到的地址。右边方法执行查询后，才返回包含实际地址记录的集合。
+
+list不是Java中“自动查询数据库”的关键字，只是项目给方法起的名字。这个方法由Service调用Mapper执行查询；如果整条调用链一致修改方法命名，也可以使用其他清楚的名字。List类型、变量名和方法名三者不要混为一谈。
+
+当前AddressBookService同时声明了：
+
+```java
+List<AddressBook> list(AddressBook addressBook);
+AddressBook getById(Long id);
+```
+
+前者按条件查询多条结果，返回列表；后者按地址编号查询单条结果，返回一个AddressBook对象，找不到时可能为null。列表的元素个数不是固定为多条，也不是要求前端一次新增多条地址。
+
+本节仅解释Java对象和集合在当前接口中的作用，不展开集合实现类、底层结构或Redis的List数据类型。
+
+自测：用户有3条地址，list方法应返回什么？包含3个AddressBook对象的List。把左边变量list改名为addresses，是否改变查询结果？不会，它只是结果变量的名字。
 
 ## 21. 用 AI 开发时，自己负责什么
 
