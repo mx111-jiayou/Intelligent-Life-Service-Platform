@@ -31,10 +31,11 @@
 | 19 | Day 7 购物车：添加、数量累加、动态查询与按用户清空 |
 | 20 | Day 8 下单准备：地址簿、新增、查看与切换默认地址 |
 | 21 | Day 8 提交订单：订单主表、明细与购物车清理 |
-| 22 | 使用 AI 开发时的验收方法 |
-| 23 | 自测题与答案 |
+| 22 | Day 8 微信支付：准备支付、调起收银台与结果通知 |
+| 23 | 使用 AI 开发时的验收方法 |
+| 24 | 自测题与答案 |
 
-当前进度：2026-10-20，补讲21.12：为什么先保存待付款订单，再付款。区分用户点一次按钮、后端创建交易记录、向前端返回ID这三件事；允许最后才展示或返回ID，但扣款前通常先留下可追踪记录，以便关联商品、金额与支付结果并处理失败。未运行应用、真实下单或支付。
+当前进度：2026-10-20，进入22.1—22.4微信支付概览：后端请求微信取得预支付信息并组装支付参数，小程序调起付款界面，微信通过支付通知告知后端，后端核验后更新订单。重点区分准备支付和真正支付，以及前端回调与后端通知。现有回调实现的验证缺口已记录；未运行应用、真实下单或支付。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -4357,9 +4358,107 @@ paySuccess方法再按支付对应的业务订单号查回订单，更新支付�
 
 自测：页面只有一个“立即支付”按钮，是否说明后端必须先收钱后建订单？不是，一次点击可以触发内部多步流程。最后才返回ID，是否代表后端最后才创建记录？不是，记录可以提前保存。
 
-## 22. 用 AI 开发时，自己负责什么
+## 22. Day 8：微信支付
 
-### 22.1 描述一个可验收的需求
+### 22.1 先分清三个参与者
+
+| 参与者 | 本次负责什么 |
+| --- | --- |
+| 外卖小程序 | 请求支付参数，调用微信提供的能力调起付款界面 |
+| 本项目Java后端 | 准备支付请求，接收并处理支付结果，更新订单 |
+| 微信支付系统 | 提供支付能力，处理用户确认付款及支付结果通知 |
+
+假设本系统已经保存未支付订单A001，金额58元。A001是便于讲解的虚构业务订单号。
+
+这次先理解三个阶段：准备支付、用户确认付款、后端核实结果。调用本项目的payment接口成功，不代表已经扣款。
+
+### 22.2 后端先准备支付参数
+
+前端带订单号和JWT请求PUT /user/order/payment。当前OrderServiceImpl.payment查询当前用户、按订单号取得订单，然后调用：
+
+```java
+weChatPayUtil.pay(
+    ordersPaymentDTO.getOrderNumber(),
+    orders.getAmount(),
+    "苍穹外卖订单",
+    user.getOpenid()
+);
+```
+
+这次openid用于向微信标识付款用户；订单号关联本系统订单；金额取自已保存的订单。JWT用于前端访问本项目接口的身份验证，不是拿JWT代替openid去向微信扣款。
+
+WeChatPayUtil内部通过HTTP客户端向微信请求预支付信息，取得prepay_id后，构造时间戳、随机字符串、预支付信息及签名等，返回供小程序调起付款的参数。
+
+当前返回的OrderPaymentVO包含timeStamp、nonceStr、packageStr、signType、paySign。暂时把它们理解为“一组调起付款界面需要的数据”，不要求背签名算法。它们不是支付成功的证明。
+
+本项目代码使用/v3/pay/transactions/jsapi端点。本节按已有源码解释，不把这次查到的服务商文档参数或其他新版端点直接套入本项目。
+
+### 22.3 小程序拿到参数，调起微信付款界面
+
+前端按小程序支付API要求，将后端参数交给wx.requestPayment，调起微信支付收银台，用户在其中确认付款。支付也可能被用户取消或执行失败。
+
+本项目的返回字段叫packageStr，而wx.requestPayment的参数名叫package，前端衔接时需要进行对应。以下仅说明字段映射，不是已核验的项目小程序代码：
+
+```javascript
+wx.requestPayment({
+  timeStamp: paymentData.timeStamp,
+  nonceStr: paymentData.nonceStr,
+  package: paymentData.packageStr,
+  signType: paymentData.signType,
+  paySign: paymentData.paySign
+});
+```
+
+paymentData代表从本项目支付接口响应data中取得的对象。示例省略前端成功、失败和查询订单处理，不应当作完整页面实现。
+
+微信官方文档说明，小程序可用requestPayment调起收银台，前端回调不能作为唯一可靠的支付状态依据，应以后端查单和支付成功通知为准：[官方小程序调起支付说明](https://pay.wechatpay.cn/doc/v3/partner/4012090181)。本次仅使用其中通用调起支付与结果确认原则，不移植服务商身份参数。
+
+### 22.4 微信支付通知：由微信来请求我们的后端
+
+后端准备支付时，WeChatPayUtil把配置中的notify_url交给微信。可以把它理解为“支付结果请通知这个后端接口”。
+
+前端请求后端准备支付，与微信通知后端支付结果，是两个来源不同的HTTP请求：
+
+```text
+小程序 → 我们的后端：我要支付订单A001
+我们的后端 → 微信：申请这笔交易的支付信息
+我们的后端 → 小程序：返回调起支付所需参数
+小程序 → 微信收银台：调起付款，用户确认
+微信 → 我们的通知接口：发送支付结果通知
+我们的后端：核验结果，更新订单A001
+```
+
+这是逻辑流程示意，不能理解成前端回调与后端通知一定按固定先后顺序到达。
+
+当前仓库中通知入口是PayNotifyController的/notify/paySuccess，包目录实际拼写为controller/nofity。配置的notify_url需要指向正确、可访问的后端入口；本次没有读取真实配置值或验证网络可达性。
+
+当前处理代码读取请求正文、解密通知内容，提取out_trade_no，再调用：
+
+```java
+orderService.paySuccess(outTradeNo);
+```
+
+paySuccess按业务订单号查回订单，并设置：
+
+- payStatus=PAID，即支付状态已支付。
+- status=TO_BE_CONFIRMED，即订单状态待商家接单。
+- checkoutTime为当前时间。
+
+之后调用Mapper更新订单，并调用WebSocket推送来单提醒；WebSocket机制留到后面的课程讲解。
+
+#### 业务要求和当前实现要分清
+
+合理的处理流程是在验证微信通知、核对订单与金额等信息后更新状态，并处理重复通知；不能因为请求发送到名为paySuccess的接口就直接信任其含义。
+
+当前读取的PayNotifyController只有解密及提取字段，没有显示通知签名验证、成功交易状态判断、商户/应用/金额核对；paySuccess也没有显示重复通知的幂等处理。解密和验签不是同一个动作，出站HTTP客户端处理响应验签也不会自动覆盖这个入站Controller。因此本节不声称现有支付代码已达到完整上线要求，没有修改支付实现。
+
+前面已记录的订单归属与金额校验缺口仍然存在。本次只做源码阅读与教学笔记，未发起微信支付、未收取或退还资金、未测试支付通知。
+
+自测：后端返回OrderPaymentVO是否代表用户已经付款？不代表，只是返回调起支付需要的数据。微信支付通知是谁调用我们的接口？微信支付系统。只凭小程序页面说成功就把订单改为已支付可以吗？不应，应以经后端核验的支付结果为依据。
+
+## 23. 用 AI 开发时，自己负责什么
+
+### 23.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -4373,7 +4472,7 @@ paySuccess方法再按支付对应的业务订单号查回订单，更新支付�
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 22.2 验收比“代码能运行”多一步
+### 23.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -4386,7 +4485,7 @@ paySuccess方法再按支付对应的业务订单号查回订单，更新支付�
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 23. 自测与答案
+## 24. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -4492,6 +4591,9 @@ paySuccess方法再按支付对应的业务订单号查回订单，更新支付�
 - [提交订单参数](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/dto/OrdersSubmitDTO.java)
 - [订单主表SQL与主键回填](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/OrderMapper.xml)
 - [订单明细批量保存SQL](D:/sky-take-out/sky-take-out/sky-server/src/main/resources/mapper/OrderDetailMapper.xml)
+- [微信支付工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/WeChatPayUtil.java)
+- [支付参数返回对象](D:/sky-take-out/sky-take-out/sky-pojo/src/main/java/com/sky/vo/OrderPaymentVO.java)
+- [微信支付通知入口](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/nofity/PayNotifyController.java)
 
 ### 已有学习资料
 
