@@ -26,10 +26,11 @@
 | 14 | Day 4 套餐管理：套餐、菜品与关联表 |
 | 15 | Day 5 店铺营业状态与 Redis 入门 |
 | 16 | Day 6 微信登录：code、openid、本地用户与token |
-| 17 | 使用 AI 开发时的验收方法 |
-| 18 | 自测题与答案 |
+| 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
+| 18 | 使用 AI 开发时的验收方法 |
+| 19 | 自测题与答案 |
 
-当前进度：2026-10-20，token生成已讲解，本节进入16.7：用户端按authentication请求头携带token，拦截器校验签名与有效期，取userId存入BaseContext，再放行到业务；失败返回401。下一节可继续商品浏览。仅阅读源码并整理笔记，没有运行真实登录或接口鉴权测试。
+当前进度：2026-10-20，微信登录及token校验已讲解。本节进入第17节商品浏览：先取启用分类，选择具体分类ID后查询起售菜品，组装含口味的VO给页面展示，并区别type、categoryId、dishId。当前源码已含后续缓存能力，缓存细节留待Day 7。未运行小程序或实际浏览测试。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -2860,9 +2861,94 @@ token缺失、签名校验失败、过期、载荷字段不符合预期等导致
 
 小练习：token经校验代表用户7，但请求参数随意写userId=8，能否直接当作用户8？答案：不能，当前身份应来自已验证token；记录操作仍需归属校验。登录接口为什么可以不带token？因为它在该拦截器的排除路径中。
 
-## 17. 用 AI 开发时，自己负责什么
+## 17. Day 6：商品浏览
 
-### 17.1 描述一个可验收的需求
+### 17.1 从页面的一次点击开始
+
+顾客进入菜单页面，先看到“热菜、饮品”等分类，点击热菜后显示该分类下的菜品。这里的主要数据流是两次查询，不是点击分类就向数据库新增或修改记录。
+
+```text
+请求分类列表 → 显示分类名称并保留ID
+    → 用户点击“热菜”，取得它的分类ID
+    → 按分类ID请求菜品列表
+    → 后端返回名称、价格、图片、口味等
+    → 页面渲染列表
+```
+
+当前已阅读的是Java后端接口，前端点击与渲染是根据接口用途说明的业务流程，不声称已运行或核验了完整小程序组件。
+
+### 17.2 查询分类
+
+菜品分类请求：`GET /user/category/list?type=1`。type=1表示菜品分类，type=2表示套餐分类。CategoryController调用categoryService.list，再由Mapper查询分类。
+
+CategoryMapper.xml实际要求status=1，并按sort升序、create_time倒序排列。传type时再加type条件。因此顾客分类列表主要取启用分类，不是直接照搬管理端所有分类记录。
+
+示例返回的分类数据中有id和name：
+
+| id | name | type |
+| --- | --- | --- |
+| 1 | 热菜 | 1 |
+| 2 | 饮品 | 1 |
+
+前端展示name，用户选中时使用id。不要只保存“热菜”文字，却无法确定请求哪个分类。
+
+### 17.3 选中分类后查询菜品
+
+选择分类id=1，请求 `GET /user/dish/list?categoryId=1`。当前接口在需要查询数据库的分支构造：
+
+```java
+Dish dish = new Dish();
+dish.setStatus(StatusConstant.ENABLE);
+dish.setCategoryId(categoryId);
+List<DishVO> list = dishService.listWithFlavor(dish);
+```
+
+这里的Dish对象承载查询条件，new对象和set属性不会插入菜品。主要条件的SQL效果相当于：
+
+```sql
+SELECT * FROM dish
+WHERE category_id = 1 AND status = 1;
+```
+
+既限定属于热菜分类，也限定起售状态。顾客浏览与管理端分页查询目的不同：管理端可能需要看停售菜品来维护，当前用户端数据库分支明确筛选起售菜品。
+
+### 17.4 VO如何带上口味
+
+listWithFlavor先查询菜品列表，再逐道菜构造DishVO、查询该菜品的口味配置并放入flavors，最后返回列表。
+
+```text
+宫保鸡丁100的基本信息
+    + dish_flavor中dish_id=100的口味配置
+    → 一条DishVO
+```
+
+这是一组单表查询后在Java中组装，不能因为一个VO包含多表信息就说一定使用了一条JOIN。现在已有的循环逐道查询方式会产生多次查询，后续性能优化可按需讨论，本节不改实现。
+
+页面据名称、价格、image地址显示菜品，需要选规格时使用flavors里的选项。返回结果是列表，不是前面分页中的total/records结构；Controller外层仍用Result.success(list)包装，所以data直接是列表。
+
+### 17.5 几个编号不要混
+
+| 参数 | 含义 |
+| --- | --- |
+| type=1 | 查询菜品分类这一类分组 |
+| categoryId=1 | 选择具体编号1的分类，例如热菜 |
+| dishId=100 | 具体一道菜，例如宫保鸡丁 |
+
+type与分类ID都可能碰巧是1，但含义不同。type回答“哪一种分类”，categoryId回答“具体哪个分类”。类别查询得到的id用于后续categoryId，而不是把type直接当作categoryId。
+
+选择套餐分类时，用户端另有 `GET /user/setmeal/list?categoryId=...`，套餐列表也筛选起售状态；查看套餐包含的菜品使用 `GET /user/setmeal/dish/{id}`，这里id是套餐编号。
+
+### 17.6 当前实现已包含缓存
+
+实际DishController先用dish_分类ID查询Redis，命中则返回，未命中才执行上述数据库与口味查询，并缓存30分钟。套餐列表还有@Cacheable注解。这里不把实际代码说成每次都直接查MySQL；本节只先讲查询条件和展示数据的来源，缓存命中与更新策略按Day 7展开。
+
+这些分类/菜品/套餐查询路径仍受当前用户JWT拦截器配置保护，需要按约定携带authentication；店铺状态查询是前面配置中特别排除的接口，不应据此认为所有商品接口都已公开。
+
+小练习：分类返回id=2、name=饮品、type=1，点击饮品应该向菜品接口提交categoryId=1还是2？答案：2。type=1只表示它属于菜品分类，不是该分组自己的ID。
+
+## 18. 用 AI 开发时，自己负责什么
+
+### 18.1 描述一个可验收的需求
 
 说明功能、已有接口、修改范围、业务规则和验证场景。例如：
 
@@ -2876,7 +2962,7 @@ token缺失、签名校验失败、过期、载荷字段不符合预期等导致
 完成后说明改动，并验证正常、空数据、失败和连续搜索场景。
 ```
 
-### 17.2 验收比“代码能运行”多一步
+### 18.2 验收比“代码能运行”多一步
 
 | 功能 | 核心验证 |
 | --- | --- |
@@ -2889,7 +2975,7 @@ token缺失、签名校验失败、过期、载荷字段不符合预期等导致
 
 前端藏按钮不代替后端权限检查；页面显示新值不证明数据库保存成功；AI 声称完成不代替实际验证。Git 查看改动和回退、日志排错、测试与部署将随后续业务继续学习。
 
-## 18. 自测与答案
+## 19. 自测与答案
 
 先自行回答，再展开答案。
 
@@ -2977,6 +3063,9 @@ token缺失、签名校验失败、过期、载荷字段不符合预期等导致
 - [JWT签发与校验工具](D:/sky-take-out/sky-take-out/sky-common/src/main/java/com/sky/utils/JwtUtil.java)
 - [用户端JWT拦截器](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/interceptor/JwtTokenUserInterceptor.java)
 - [接口保护路径配置](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/config/WebMvcConfiguration.java)
+- [用户端分类浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/CategoryController.java)
+- [用户端菜品浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/DishController.java)
+- [用户端套餐浏览](D:/sky-take-out/sky-take-out/sky-server/src/main/java/com/sky/controller/user/SetmealController.java)
 
 ### 已有学习资料
 
