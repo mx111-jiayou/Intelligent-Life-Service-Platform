@@ -31,7 +31,7 @@
 | 19 | 使用 AI 开发时的验收方法 |
 | 20 | 自测题与答案 |
 
-当前进度：2026-10-20，主线已讲到18.8 Spring Cache，正在补讲微信登录。用户仍不清楚JWT使用时机，本次16.10集中讲“登录成功时后端签发，前端保存，后续受保护请求携带，后端验证并识别用户”。暂不推进购物车业务；未运行真实微信登录或接口联调。
+当前进度：2026-10-20，主线已讲到18.8 Spring Cache，正在补讲微信登录。16.10解释JWT使用时机，本次16.11解释appid和secret属于小程序本身，由开发者在微信平台管理并配置到后端；与各个用户的code、openid区分。暂不推进购物车业务；未运行真实微信登录或接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3056,6 +3056,41 @@ authentication: 登录时收到的JWT字符串
 本次核对：UserController.login、JwtTokenUserInterceptor、WebMvcConfiguration、ShoppingCartController和用户令牌请求头配置。没有修改业务代码，没有把JWT发送给微信接口；微信登录换取openid使用的是code及小程序接口参数。
 
 自测：点击“查看购物车”时，前端带最初的code还是登录成功后获得的token？带token。谁签发这里的JWT？本项目Java后端。
+
+### 16.11 appid和secret属于谁，从哪里来
+
+用户问：“appid和secret是小程序在微信里面有的吗？”
+
+是的，它们属于在微信平台注册的小程序。这里的“在微信里面”准确地说是微信的小程序管理平台，不是普通用户手机微信里需要填写的个人信息。
+
+| 参数 | 含义 | 谁负责管理 |
+| --- | --- | --- |
+| appid / AppID | 这个小程序的标识，用于说明是哪个小程序 | 小程序开发者或管理员 |
+| secret / AppSecret | 这个小程序调用相关接口时使用的密钥 | 小程序开发者或管理员，在后端保管 |
+
+开发者注册小程序后，在微信公众平台的小程序管理后台获取AppID，并按平台流程生成或管理AppSecret，再配置到本项目后端。这里不固定具体菜单层级；本次尝试读取微信官方文档未成功，不声称已核对当前后台界面。
+
+举例：我们开发一个“校园外卖”小程序。小明和小红都使用它时，后端请求微信所用的是这个小程序同一套当前有效的appid、secret。每个人本次登录获得的code不同，微信返回的用户openid也不同。secret可以重置，不要理解成永远不会变化。
+
+```text
+appid + secret：说明是哪个小程序，并提供该小程序的接口凭据
+code：本次登录的临时凭证
+openid：微信返回的用户在该小程序下的标识
+```
+
+项目中的WeChatProperties用@ConfigurationProperties(prefix = "sky.wechat")绑定后端配置，包含appid和secret字段。UserServiceImpl.getOpenid读取配置，放进请求微信的参数：
+
+```java
+map.put("appid", wxChatProperties.getAppid());
+map.put("secret", wxChatProperties.getSecret());
+map.put("js_code", code);
+```
+
+前两项从后端配置读取；code来自小程序本次提交。用户不需要输入appid或secret，也不是每登录一个用户就生成一套appid和secret。
+
+AppID可以用于标识小程序；AppSecret需要保密，应在后端使用，不应放到小程序前端供用户取得。它也不同于本项目签发JWT使用的密钥。
+
+自测：小明和小红登录同一个小程序，需要两套appid吗？不需要，appid标识小程序，不标识每个用户。
 
 ## 17. Day 6：商品浏览
 
