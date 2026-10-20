@@ -28,11 +28,11 @@
 | 16 | Day 6 微信登录：code、openid、本地用户、token 与 HttpClient |
 | 17 | Day 6 商品浏览：分类选择、菜品筛选与口味展示 |
 | 18 | Day 7 菜品缓存：先读Redis、未命中查库与回填 |
-| 19 | Day 7 购物车：识别用户、添加商品与数量累加 |
+| 19 | Day 7 购物车：添加、数量累加、动态查询与按用户清空 |
 | 20 | 使用 AI 开发时的验收方法 |
 | 21 | 自测题与答案 |
 
-当前进度：2026-10-20，主线已讲到19.1—19.5添加购物车。本次按用户追问补充1.4：C端顾客与B端商家管理端在业务目标、操作权限、数据范围和规则上的区别；以菜品、营业状态、购物车举例，说明可以共用后端和数据表。下一节可继续购物车查询及清空。未运行应用或进行接口联调。
+当前进度：2026-10-20，本节19.6—19.8讲查看和清空购物车：从BaseContext取得当前用户ID，用同一个动态查询方法查询特定商品或整份购物车，清空时按user_id删除该用户的购物车记录。已讲当前Controller可见的添加、查看、清空三个接口；下一阶段可衔接地址簿和下单。未运行应用或进行接口联调。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3618,6 +3618,110 @@ Service补充userId，查询购物车
 本节核对ShoppingCartController、ShoppingCartServiceImpl、ShoppingCartDTO、ShoppingCart实体、ShoppingCartMapper及XML；解释正常流程，不声称已验证并发点击、请求重试或非法参数。本节仅更新学习笔记。
 
 自测：连续两次正常添加同一份微辣宫保鸡丁，第一次新增记录数量1，第二次做什么？查询已有记录并把数量更新为2。当前用户编号从哪里来？通过JWT校验后，由BaseContext提供。
+
+### 19.6 查看购物车：查询当前用户的全部购物车记录
+
+前端调用GET /user/shoppingCart/list，请求头authentication携带JWT。当前接口不要求前端传userId；后端通过用户JWT拦截器验证身份，把本地用户编号放入BaseContext。
+
+ShoppingCartServiceImpl.showShoppingCart实际代码：
+
+```java
+Long userId = BaseContext.getCurrentId();
+ShoppingCart shoppingCart = ShoppingCart.builder()
+        .userId(userId)
+        .build();
+List<ShoppingCart> list = shoppingCartMapper.list(shoppingCart);
+return list;
+```
+
+builder这一段是在创建Java对象并设置userId。本例等价于：
+
+```java
+ShoppingCart shoppingCart = new ShoppingCart();
+shoppingCart.setUserId(userId);
+```
+
+这不是向数据库插入一个新购物车。对象这里只用来携带查询条件，调用Mapper才执行SELECT。
+
+假设当前用户ID为7，查询条件只有userId=7，正常生成的SQL可用下面的带值形式帮助理解，实际执行使用参数绑定：
+
+```sql
+select * from shopping_cart where user_id = 7;
+```
+
+假设数据表里有：
+
+| id | user_id | name | number |
+| --- | --- | --- | --- |
+| 501 | 7 | 宫保鸡丁 | 2 |
+| 502 | 7 | 米饭 | 1 |
+| 503 | 8 | 柠檬茶 | 1 |
+
+查询用户7时返回501、502两条记录。Controller再调用Result.success(shoppingCartList)包装为接口响应，返回前端展示。当前用户没有记录时，正常查询得到空列表，表示购物车为空。
+
+### 19.7 为什么添加和查看能共用同一个list方法
+
+两个业务都调用shoppingCartMapper.list(shoppingCart)，区别是传入对象中哪些属性有值：
+
+| 使用场景 | 本例传入的条件 | 想查什么 |
+| --- | --- | --- |
+| 添加商品前检查是否已有 | userId=7、dishId=100、dishFlavor=微辣 | 用户7有没有这一份商品 |
+| 查看整份购物车 | userId=7 | 用户7的全部购物车记录 |
+
+Mapper XML根据非null字段拼接条件：
+
+```xml
+<where>
+    <if test="userId != null">
+        and user_id = #{userId}
+    </if>
+    <if test="dishId != null">
+        and dish_id = #{dishId}
+    </if>
+    <if test="setmealId != null">
+        and setmeal_id = #{setmealId}
+    </if>
+    <if test="dishFlavor != null">
+        and dish_flavor = #{dishFlavor}
+    </if>
+</where>
+```
+
+查看整份购物车时，没有设置dishId、setmealId、dishFlavor，它们为null，对应条件就不会添加。只有userId条件被保留；where标签会按需补WHERE，并处理开头多余的AND。
+
+这就是前面动态SQL在实际业务里的复用：同一个Mapper方法按不同输入形成不同筛选条件。
+
+这里的“只查当前用户”依赖有效登录上下文和SQL中的user_id条件。当前XML对userId也使用非null判断，所以不能把它理解成数据库自动识别登录用户，或声称传任何参数都能保证数据隔离。本节基于JWT校验成功且取得有效userId的正常流程解释。
+
+### 19.8 清空购物车：删除这个用户的记录
+
+前端调用DELETE /user/shoppingCart/clean，并携带JWT。Service中实际只有：
+
+```java
+Long userId = BaseContext.getCurrentId();
+shoppingCartMapper.deleteByUserId(userId);
+```
+
+Mapper使用注解声明SQL：
+
+```java
+@Delete("delete from shopping_cart where user_id = #{userId}")
+void deleteByUserId(Long userId);
+```
+
+用户7调用时，可理解为：
+
+```sql
+delete from shopping_cart where user_id = 7;
+```
+
+对于19.6的示例，删除501、502，用户8的503保留。删除目标是shopping_cart中的待购记录，不是dish菜品表，也不是已生成的订单。
+
+前端应该在接口成功后更新购物车显示或重新查询；仅把页面上的商品藏起来，并不等于数据库记录已删除。当前后端清空接口返回Result.success()，没有附带新的列表。
+
+本节核对ShoppingCartController、ShoppingCartServiceImpl、ShoppingCartMapper及XML，未运行真实数据库查询或删除。当前Controller可见添加、查看、清空三个接口，未看到减少一份数量的接口；不要把课程中可能包含的减数量功能当成本仓库已实现。
+
+自测：用户7清空购物车时，用户8的记录会一起删除吗？正常按user_id=7删除时不会。查看整份购物车为什么不传dishId？因为要查该用户的全部待购商品，而不是限定某道菜。
 
 ## 20. 用 AI 开发时，自己负责什么
 
