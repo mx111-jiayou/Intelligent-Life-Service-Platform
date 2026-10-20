@@ -31,7 +31,7 @@
 | 19 | 使用 AI 开发时的验收方法 |
 | 20 | 自测题与答案 |
 
-当前进度：2026-10-20，菜品缓存读取已讲解，本节进入18.7管理端缓存清理：先更新MySQL，再删除受影响的旧缓存，下次读取未命中后重建。按实际代码区分新增时清对应分类与修改/删除/状态变更时清dish_*。下一小节可讲Spring Cache的套餐缓存注解，再进入购物车。尚未实际访问Redis或修改菜价。
+当前进度：2026-10-20，菜品手写缓存读写与清理已讲解。本节进入18.8 Spring Cache：套餐列表用@Cacheable按categoryId缓存方法返回值，管理端用@CacheEvict清单项或整个套餐缓存区域，并说明@EnableCaching和CacheManager的作用。下一阶段可进入购物车。未运行应用确认实际缓存管理器或进行真实缓存测试。
 
 Day 1 的结构和登录已讲解，但环境搭建没有逐项实操；Day 2 已讲分页、状态修改、编辑与分类删除，新增员工的完整流程尚未单独展开。不要把课程顺序误认为所有章节都已完成。
 
@@ -3113,6 +3113,80 @@ pattern = dish_*
 该策略不是说“先更新数据库再删除缓存”就完全解决了所有并发与失败问题；更新和清理之间可能失败，并发回填也有边界。这里先掌握当前正常流程，未实施故障重试或一致性改造，也未验证真实缓存效果。
 
 小练习：分类2曾缓存[]，商家新增一种起售饮品，只写MySQL不清缓存，下一请求能否因为空列表自动查到新商品？不能，当前[]也命中，所以新增后需要让相应缓存失效。
+
+### 18.8 Spring Cache：用注解声明同样的缓存规则
+
+#### 先区分统一能力与存储服务
+
+Spring Cache是Spring提供的缓存抽象与注解机制，Redis可以作为其底层存储。它不是又安装一个名为Spring Cache的数据库，也不是注解天然就能确定所有场景都使用Redis。实际通过CacheManager等配置选择实现。
+
+项目引入spring-boot-starter-cache，SkyApplication上有@EnableCaching。当前还具备Redis连接与模板配置，但本节没有启动应用检查实际CacheManager类型、缓存物理键格式或运行参数。因此以下先讲已核对的注解规则；在Redis作为底层实现时，相应读写会落到Redis。
+
+#### 套餐列表的@Cacheable
+
+当前用户端SetmealController：
+
+```java
+@GetMapping("/list")
+@Cacheable(value = "setmealCache", key = "#categoryId")
+public Result<List<Setmeal>> list(Long categoryId) {
+    Setmeal setmeal = new Setmeal();
+    setmeal.setCategoryId(categoryId);
+    setmeal.setStatus(StatusConstant.ENABLE);
+    List<Setmeal> list = setmealService.list(setmeal);
+    return Result.success(list);
+}
+```
+
+在注解与缓存配置正常生效时：先按缓存名与键查找；命中直接返回缓存的方法结果，方法体里的查询不执行；未命中才执行方法，正常取得结果后按规则保存并返回。机制说明参考[Spring官方缓存注解文档](https://docs.spring.io/spring-framework/reference/integration/cache/annotations.html)。本节使用普通同步方法的基本规则，不套用新版本异步缓存特性。
+
+| 注解内容 | 意思 |
+| --- | --- |
+| value="setmealCache" | 缓存区域/名称是setmealCache，value在此用于指定缓存名 |
+| key="#categoryId" | 取本次方法参数categoryId的值作为键 |
+
+#categoryId是表达式，不是把字符串“#categoryId”作为所有请求共用的固定key。例如分类2与分类3分别保存自己的结果。只需先会读参数引用，不要求背表达式语法。
+
+本方法返回Result<List<Setmeal>>，缓存的是整个方法返回对象，而不只是其中的List；与菜品手写缓存仅保存list再包装Result的细节不同。接口返回结构仍一致地由各方法约定。
+
+#### @CacheEvict对应删除缓存
+
+当前新增套餐方法上：
+
+```java
+@CacheEvict(cacheNames = "setmealCache", key = "#setmealDTO.categoryId")
+```
+
+表示清理该区域中对应新增套餐分类ID的缓存。例如新增到分类2，清分类2对应项；下次用户查询该分类时重新执行方法并生成新结果。
+
+当前修改、删除、起售/停售套餐方法上：
+
+```java
+@CacheEvict(cacheNames = "setmealCache", allEntries = true)
+```
+
+表示清理setmealCache区域内全部条目，不表示清空整个Redis，不会由此主动删MySQL套餐、其他缓存区域或SHOP_STATUS。
+
+默认清理时机是方法正常执行返回之后。该规则依据方法调用是否正常结束，不是Spring自动解析业务响应code判断成功；抛出异常时默认不会执行这次after-invocation清理。这里不展开beforeInvocation等高级参数。
+
+#### 需要配置才能生效
+
+@EnableCaching启用相应注解处理，缓存管理器负责选定缓存实现，调用需经过相应Spring代理机制。不能给自己new出来的任意对象贴一个注解，就认为它自动缓存；也不能认为一个注解自动继承了手写代码的30分钟TTL。
+
+套餐注解没有在这里指定过期分钟数。实际TTL要看选定缓存实现与其配置，不能把菜品缓存set(..., 30, MINUTES)的规则照搬到套餐缓存。
+
+#### 和前面手写逻辑对照
+
+| 需求 | 菜品手写方式 | 套餐注解方式 |
+| --- | --- | --- |
+| 命中缓存直接返回 | 自己get、判断、return | @Cacheable |
+| 未命中时计算结果再缓存 | 自己查库后set | @Cacheable |
+| 变更后清理单分类结果 | 按具体key删除 | @CacheEvict指定key |
+| 清理套餐缓存区域 | 需要自己确定范围 | @CacheEvict的allEntries=true |
+
+注解减少重复代码，但开发者仍要决定缓存的结果、键、过期策略和变更后的清理范围。@CachePut本节暂不展开。
+
+自测：分类2命中@Cacheable的缓存时，方法体中的setmealService.list还执行吗？答：正常缓存命中下不执行。allEntries=true会删除MySQL菜品吗？不会，它清理指定缓存区域。
 
 ## 19. 用 AI 开发时，自己负责什么
 
